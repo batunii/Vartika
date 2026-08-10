@@ -1,0 +1,953 @@
+"""Paragraph-by-paragraph rewrite tool for the dissertation submission.
+
+Left column shows a paragraph from the manuscript, right column takes the
+author's replacement. A headless Claude Code session checks the replacement for
+lost meaning, grammar, LaTeX validity and machine-written phrasing, and offers a
+corrected variant. The author chooses what is written, and every accepted
+paragraph becomes its own git commit.
+
+Run:  python app.py            (then open http://127.0.0.1:8000)
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+from datetime import datetime, timezone
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
+
+import texparse
+import reviewer
+from reviewer import ReviewError, review
+
+# --------------------------------------------------------------------------
+# Paths and configuration
+# --------------------------------------------------------------------------
+
+def bundle_dir() -> Path:
+    """Where index.html and the bundled style guide live.
+
+    Under PyInstaller the sources are unpacked to a temporary directory rather
+    than sitting next to the executable.
+    """
+    packed = getattr(sys, "_MEIPASS", None)
+    return Path(packed) if packed else Path(__file__).resolve().parent
+
+
+APP_DIR = bundle_dir()
+
+
+def git_root_for(folder: Path) -> Path:
+    """The enclosing git repository, or the folder itself if there is none."""
+    for candidate in [folder, *folder.parents]:
+        if (candidate / ".git").exists():
+            return candidate
+    return folder
+
+
+# Defaults for running the server directly. The launcher calls configure() with
+# a manuscript it has resolved; these only matter for `python app.py`, which
+# works on the current directory unless told otherwise.
+MANUSCRIPT = Path(os.environ.get("REWRITE_MANUSCRIPT") or Path.cwd()).resolve()
+REPO_ROOT = Path(os.environ.get("REWRITE_REPO") or git_root_for(MANUSCRIPT)).resolve()
+DATA_DIR = Path(
+    os.environ.get("REWRITE_DATA") or MANUSCRIPT.parent / ".rewrite-progress"
+).resolve()
+
+STATE_PATH = DATA_DIR / "state.json"
+AUDIT_PATH = DATA_DIR / "audit.jsonl"
+
+# Filled by discover_files() on first use: [(relpath, display title), ...]
+FILE_ORDER: list[tuple[str, str]] = []
+ROOT_TEX: Path | None = None
+
+
+def configure(
+    manuscript: Path,
+    repo_root: Path,
+    data_dir: Path,
+    root_tex: Path | None = None,
+) -> None:
+    """Point the app at a manuscript. Called by the launcher before serving.
+
+    `root_tex` names the main document explicitly. Passing it records the
+    choice, so a manuscript with several candidate roots is only asked about
+    once.
+    """
+    global MANUSCRIPT, REPO_ROOT, DATA_DIR, STATE_PATH, AUDIT_PATH
+    global FILE_ORDER, ROOT_TEX
+    MANUSCRIPT = manuscript.resolve()
+    REPO_ROOT = repo_root.resolve()
+    DATA_DIR = data_dir.resolve()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Progress belongs to the author, not the repository. Ignoring the whole
+    # directory (itself included) keeps `git status` clean wherever this runs.
+    ignore = DATA_DIR / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text("*\n", encoding="utf-8")
+    STATE_PATH = DATA_DIR / "state.json"
+    AUDIT_PATH = DATA_DIR / "audit.jsonl"
+
+    state = load_state()
+    if root_tex is None:
+        stored = state["settings"].get("root_tex")
+        if stored and (MANUSCRIPT / stored).exists():
+            root_tex = MANUSCRIPT / stored
+    else:
+        root_tex = root_tex if root_tex.is_absolute() else MANUSCRIPT / root_tex
+        state["settings"]["root_tex"] = root_tex.resolve().relative_to(MANUSCRIPT).as_posix()
+        save_state(state)
+
+    ROOT_TEX = find_root_tex(MANUSCRIPT, root_tex)
+    FILE_ORDER = discover_files(MANUSCRIPT, ROOT_TEX)
+
+
+# --------------------------------------------------------------------------
+# Working out which .tex files make up the manuscript, and in what order
+# --------------------------------------------------------------------------
+
+_INCLUDE_RE = re.compile(r"\\(?:include|input)\s*\{([^}]+)\}")
+_CHAPTER_RE = re.compile(r"\\chapter\*?\s*(?:\[[^\]]*\])?\{([^}]*)\}")
+_TITLE_CLEAN_RE = re.compile(r"\\[a-zA-Z]+\s*|[{}]")
+
+
+ROOT_NAME_HINTS = ("thesis", "main", "dissertation", "report", "document", "root")
+
+
+def find_root_candidates(manuscript: Path, max_depth: int | None = None) -> list[Path]:
+    """Every .tex carrying \\documentclass — each a document LaTeX could build.
+
+    A folder often holds more than one: a thesis beside a standalone paper, a
+    poster, or a leftover template. Ranked most-likely first, but the choice
+    between them belongs to the author.
+
+    `max_depth` bounds how far down to look. Depth 1 answers "is this folder
+    itself a manuscript", which is not the same question as "does a manuscript
+    live somewhere under here" — every ancestor directory would pass that one.
+    """
+    found: list[Path] = []
+    for path in sorted(manuscript.rglob("*.tex")):
+        parts = path.relative_to(manuscript).parts
+        if any(part.startswith(".") for part in parts):
+            continue
+        if max_depth is not None and len(parts) > max_depth:
+            continue
+        try:
+            head = path.read_text(encoding="utf-8", errors="replace")[:4000]
+        except OSError:
+            continue
+        if "\\documentclass" in head:
+            found.append(path)
+
+    def rank(path: Path) -> tuple:
+        depth = len(path.relative_to(manuscript).parts)
+        stem = path.stem.lower()
+        hinted = 0 if any(h in stem for h in ROOT_NAME_HINTS) else 1
+        includes = 0
+        try:
+            includes = -len(_INCLUDE_RE.findall(path.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            pass
+        # Shallowest first, then a recognisable name, then whoever includes most.
+        return (depth, hinted, includes, path.name.lower())
+
+    return sorted(found, key=rank)
+
+
+def find_root_tex(manuscript: Path, preferred: Path | None = None) -> Path | None:
+    """The main document. `preferred` wins when it is still a real file."""
+    if preferred is not None:
+        candidate = preferred if preferred.is_absolute() else manuscript / preferred
+        if candidate.exists():
+            return candidate
+    candidates = find_root_candidates(manuscript)
+    if candidates:
+        return candidates[0]
+    any_tex = sorted(manuscript.glob("*.tex"))
+    return any_tex[0] if any_tex else None
+
+
+def remembered_root(data_dir: Path, manuscript: Path) -> Path | None:
+    """A previously chosen main file for this manuscript, if still valid."""
+    path = data_dir / "state.json"
+    if not path.exists():
+        return None
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8")).get("settings", {}).get("root_tex")
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not stored:
+        return None
+    candidate = manuscript / stored
+    return candidate if candidate.exists() else None
+
+
+def discover_files(manuscript: Path, root: Path | None = None) -> list[tuple[str, str]]:
+    """Chapter files in the order the document includes them.
+
+    The root file comes first, because on this manuscript it carries the
+    abstract and the acknowledgments. Anything the root does not include is
+    appended afterwards so a stray chapter still reaches the queue.
+    """
+    root = root or find_root_tex(manuscript)
+    if root is None:
+        return []
+
+    source = root.read_text(encoding="utf-8", errors="replace")
+    root_rel = root.relative_to(manuscript).as_posix()
+    ordered: list[tuple[str, str]] = [(root_rel, "Front matter")]
+    seen = {root_rel}
+    chapter_number = 0
+
+    for raw in _INCLUDE_RE.findall(source):
+        name = raw.strip().lstrip("./")
+        if not name.endswith(".tex"):
+            name += ".tex"
+        # \include paths resolve against the main file's directory, which is not
+        # the manuscript root when the document lives in a subfolder.
+        path = root.parent / name
+        if not path.exists():
+            path = manuscript / name
+        if not path.exists():
+            continue
+        try:
+            rel = path.resolve().relative_to(manuscript.resolve()).as_posix()
+        except ValueError:
+            continue
+        if rel in seen:
+            continue
+        seen.add(rel)
+
+        body = path.read_text(encoding="utf-8", errors="replace")
+        match = _CHAPTER_RE.search(body)
+        title = _TITLE_CLEAN_RE.sub("", match.group(1)).strip() if match else path.stem
+        if match and "appendi" not in rel.lower():
+            chapter_number += 1
+            title = f"{chapter_number}. {title}"
+        ordered.append((rel, title))
+
+    # Sweep up prose the root never includes, so nothing is silently dropped.
+    # Other candidate roots are skipped: a poster or a leftover template beside
+    # the thesis is a separate document, not a chapter of this one.
+    other_roots = {
+        p.relative_to(manuscript).as_posix()
+        for p in find_root_candidates(manuscript)
+    } - seen
+    for path in sorted(manuscript.rglob("*.tex")):
+        rel = path.relative_to(manuscript).as_posix()
+        if rel in seen or rel in other_roots:
+            continue
+        if any(part.startswith(".") for part in Path(rel).parts):
+            continue
+        ordered.append((rel, path.stem))
+
+    return ordered
+
+# Offered in the frontend picker. The CLI resolves these aliases to the current
+# model in each family, so they do not go stale.
+AVAILABLE_MODELS = [
+    {"id": "sonnet", "label": "Sonnet",
+     "note": "the default. About $0.05 and 20s per review."},
+    {"id": "haiku", "label": "Haiku",
+     "note": "not the cheap option here. Measured slower and barely cheaper "
+             "than Sonnet, because it writes far longer findings."},
+    {"id": "opus", "label": "Opus",
+     "note": "most thorough, slowest and dearest. Worth it for a final pass."},
+]
+
+DEFAULT_SETTINGS = {
+    "word_limit": 30000,
+    "model": "sonnet",
+    "auto_commit": True,
+    # None detects the file's own wrap column, 0 disables re-wrapping.
+    "wrap_width": None,
+    # "auto" uses a conventionally named style file beside the manuscript if one
+    # exists, "none" sends no writing rules, or a path relative to the manuscript.
+    "style_guide": "auto",
+    # How the rules reach the reviewer. See REVIEW_MODES.
+    "review_mode": "hybrid",
+    "hybrid_turns": 4,
+    "session_turns": 30,
+}
+
+# Figures below are measured, not estimated: 24 paragraphs damaged identically
+# and reviewed by all three modes. See compare_modes.py and the README.
+REVIEW_MODES = [
+    {
+        "id": "fresh",
+        "label": "Fresh each review",
+        "summary": "Every review is its own process carrying the full rules.",
+        "cost": 0.0655,
+        "knob": None,
+        "pros": [
+            "Nothing carries over: no paragraph can influence the verdict on another.",
+            "Graded severity most strictly of the three in testing.",
+            "Cost per review never changes, however long you work.",
+        ],
+        "cons": [
+            "Dearest: about $16.50 for a 252-paragraph pass.",
+            "Slowest, around 19s per review.",
+            "Re-sends the same rules every time, which is most of what you pay for.",
+        ],
+    },
+    {
+        "id": "hybrid",
+        "label": "Hybrid",
+        "summary": "Sends the rules once, resumes for a few reviews, then starts over.",
+        "cost": 0.0437,
+        "knob": {"setting": "hybrid_turns", "label": "Re-send the rules every",
+                 "suffix": "reviews", "min": 2, "max": 20},
+        "pros": [
+            "About a third cheaper than Fresh: roughly $11 for a full pass.",
+            "Detected the same faults as Fresh on 21 of 24 paragraphs.",
+            "Cost per review stays flat, because history is cleared regularly.",
+            "Re-reads the full rules often, so it cannot drift far from them.",
+        ],
+        "cons": [
+            "Grades severity slightly more leniently than Fresh.",
+            "Within a run of reviews the reviewer can see the previous few.",
+        ],
+    },
+    {
+        "id": "session",
+        "label": "One long session",
+        "summary": "Sends the rules once and keeps resuming the same conversation.",
+        "cost": 0.0390,
+        "knob": {"setting": "session_turns", "label": "Start a new session every",
+                 "suffix": "reviews", "min": 5, "max": 100},
+        "pros": [
+            "Cheapest per review early on, and the fastest at about 12s.",
+            "Agreed with Fresh on every verdict in testing.",
+        ],
+        "cons": [
+            "Cost climbs as it runs: 62% more by the 24th review than the first few.",
+            "Over a full cycle it saves no more than Hybrid, for more accumulated context.",
+            "The reviewer carries every paragraph it has already seen.",
+        ],
+    },
+]
+
+
+def mode_turns(settings: dict) -> int:
+    """How many reviews one primed conversation serves. 0 means never reuse."""
+    mode = settings.get("review_mode", "hybrid")
+    if mode == "hybrid":
+        return max(2, int(settings.get("hybrid_turns") or 4))
+    if mode == "session":
+        return max(5, int(settings.get("session_turns") or 30))
+    return 0
+
+# The live conversation, when session mode is on. Deliberately not persisted:
+# a session id belongs to a running CLI, not to the manuscript.
+REVIEW_SESSION = reviewer.ReviewSession()
+
+_lock = threading.Lock()
+
+
+# --------------------------------------------------------------------------
+# State
+# --------------------------------------------------------------------------
+
+EMPTY_USAGE = {
+    "reviews": 0, "cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0,
+    "cache_read_tokens": 0, "cache_write_tokens": 0, "duration_ms": 0,
+}
+
+
+def load_state() -> dict:
+    if STATE_PATH.exists():
+        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    else:
+        state = {"version": 1, "records": {}, "settings": {}}
+    state.setdefault("records", {})
+    state["usage"] = {**EMPTY_USAGE, **state.get("usage", {})}
+    state.setdefault("usage_by_model", {})
+    settings = {**DEFAULT_SETTINGS, **state.get("settings", {})}
+    state["settings"] = settings
+    return state
+
+
+def accumulate_usage(state: dict, meta: dict) -> None:
+    """Add one review's token spend to the running totals."""
+    model = meta.get("model") or state["settings"]["model"]
+    buckets = [state["usage"], state["usage_by_model"].setdefault(model, dict(EMPTY_USAGE))]
+    for bucket in buckets:
+        bucket["reviews"] += 1
+        bucket["cost_usd"] = round(bucket["cost_usd"] + (meta.get("cost_usd") or 0.0), 6)
+        for field in ("input_tokens", "output_tokens", "cache_read_tokens",
+                      "cache_write_tokens", "duration_ms"):
+            bucket[field] += meta.get(field) or 0
+
+
+def save_state(state: dict) -> None:
+    STATE_PATH.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def audit(entry: dict) -> None:
+    entry["ts"] = datetime.now(timezone.utc).isoformat()
+    with AUDIT_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+STYLE_NAMES = ("STYLE.md", "style.md", "STYLE-GUIDE.md", "style-guide.md", "WRITING.md")
+
+
+def available_styles() -> list[str]:
+    """Markdown files that could serve as a style guide, likeliest first.
+
+    Offered in the picker so nobody has to type a path. Covers the manuscript
+    folder, its parent, and any project skill files, which is where a Claude
+    Code project keeps its writing conventions.
+    """
+    found: list[Path] = []
+    globs = (
+        (MANUSCRIPT, "*.md"),
+        (MANUSCRIPT.parent, "*.md"),
+        (REPO_ROOT / ".claude" / "skills", "*/SKILL.md"),
+        (REPO_ROOT, "STYLE.md"),
+    )
+    for folder, pattern in globs:
+        try:
+            found.extend(sorted(folder.glob(pattern)))
+        except OSError:
+            continue
+
+    def rank(path: Path) -> tuple[int, str]:
+        name = path.name.lower()
+        stem = path.stem.lower()
+        if name in {n.lower() for n in STYLE_NAMES}:
+            return (0, name)
+        if "skill" in stem or "style" in stem or "writing" in stem:
+            return (1, name)
+        return (2, name)
+
+    ordered: list[str] = []
+    for path in sorted(found, key=rank):
+        rel = os.path.relpath(path, MANUSCRIPT).replace("\\", "/")
+        if rel not in ordered:
+            ordered.append(rel)
+    return ordered[:40]
+
+
+def style_guide_path() -> Path | None:
+    """The style guide in force, or None when the reviewer should get no rules.
+
+    Nothing is sent unless the author points at a file. A conventionally named
+    file beside the manuscript is offered as the default, but it is still
+    recorded as an explicit choice the first time it is used.
+    """
+    state = load_state()
+    setting = state["settings"].get("style_guide", "auto")
+
+    if setting in (None, "", "none"):
+        return None
+    if setting != "auto":
+        candidate = MANUSCRIPT / setting
+        return candidate if candidate.exists() else None
+
+    for name in STYLE_NAMES:
+        candidate = MANUSCRIPT / name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def style_guide_text() -> str:
+    """The writing conventions the reviewer enforces, or nothing at all."""
+    path = style_guide_path()
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def file_order() -> list[tuple[str, str]]:
+    """FILE_ORDER, discovered on first use when running from source."""
+    global FILE_ORDER, ROOT_TEX
+    if not FILE_ORDER:
+        ROOT_TEX = ROOT_TEX or find_root_tex(MANUSCRIPT)
+        FILE_ORDER = discover_files(MANUSCRIPT, ROOT_TEX)
+    return FILE_ORDER
+
+
+# --------------------------------------------------------------------------
+# Manuscript access
+# --------------------------------------------------------------------------
+
+def resolve(relpath: str) -> Path:
+    path = (MANUSCRIPT / relpath).resolve()
+    if MANUSCRIPT.resolve() not in path.parents and path != MANUSCRIPT.resolve():
+        raise HTTPException(400, f"{relpath} is outside the manuscript directory")
+    if not path.exists():
+        raise HTTPException(404, f"{relpath} does not exist")
+    return path
+
+
+def read_source(path: Path) -> str:
+    """Read a .tex file without translating its line endings."""
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def write_source(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def read_blocks(relpath: str) -> tuple[str, list[texparse.Block]]:
+    source = read_source(resolve(relpath))
+    return source, texparse.prose_blocks(source)
+
+
+def record_id(relpath: str, key: str) -> str:
+    return f"{relpath}::{key}"
+
+
+def status_of(state: dict, relpath: str, block: texparse.Block) -> tuple[str, dict | None]:
+    """Whether a block has already been dealt with.
+
+    A block is matched by its own key first. If it has been rewritten, the text
+    in the file is the accepted version, so the record is found by the key that
+    version hashes to instead.
+    """
+    records = state["records"]
+    direct = records.get(record_id(relpath, block.key))
+    if direct:
+        return direct["status"], direct
+    for record in records.values():
+        if record.get("file") == relpath and record.get("final_key") == block.key:
+            return record["status"], record
+    return "pending", None
+
+
+def find_block(relpath: str, key: str) -> tuple[str, texparse.Block]:
+    source, blocks = read_blocks(relpath)
+    for block in blocks:
+        if block.key == key:
+            return source, block
+    # The paragraph may already carry an accepted rewrite, in which case its key
+    # has moved on. Fall back to the recorded final text.
+    state = load_state()
+    record = state["records"].get(record_id(relpath, key))
+    if record and record.get("final_key"):
+        for block in blocks:
+            if block.key == record["final_key"]:
+                return source, block
+    raise HTTPException(404, f"Paragraph {key} was not found in {relpath}")
+
+
+def git_path(relpath: str) -> str:
+    return str((MANUSCRIPT / relpath).relative_to(REPO_ROOT)).replace("\\", "/")
+
+
+def has_uncommitted_changes(relpath: str) -> bool:
+    """Whether the file already differs from HEAD, before the app touches it.
+
+    This matters because `git commit -- <path>` commits the file's entire
+    working-tree state, not just the paragraph the app replaced. Committing a
+    file that already carried the author's own unrelated edits would bury them
+    inside a "rewrite:" commit.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", git_path(relpath)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return True          # cannot tell, so assume the worst and do not commit
+    return completed.returncode != 0
+
+
+def git_commit(relpath: str, message: str) -> dict:
+    """Commit just this file. Other modified files in the tree are left alone."""
+    target = git_path(relpath)
+    try:
+        completed = subprocess.run(
+            ["git", "commit", "-m", message, "--", target],
+            cwd=str(REPO_ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "detail": str(exc)}
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return {"ok": False, "detail": detail[:400]}
+    sha = subprocess.run(
+        ["git", "rev-parse", "--short", "HEAD"], cwd=str(REPO_ROOT),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).stdout.strip()
+    return {"ok": True, "sha": sha}
+
+
+# --------------------------------------------------------------------------
+# Aggregates
+# --------------------------------------------------------------------------
+
+def file_summary(state: dict, relpath: str, title: str) -> dict:
+    path = MANUSCRIPT / relpath
+    if not path.exists():
+        return {"file": relpath, "title": title, "missing": True,
+                "total": 0, "done": 0, "skipped": 0, "pending": 0, "words": 0}
+    source, blocks = read_blocks(relpath)
+    counts: dict[str, int] = {"done": 0, "skipped": 0, "pending": 0}
+    for block in blocks:
+        counts[status_of(state, relpath, block)[0]] += 1
+    return {
+        "file": relpath,
+        "title": title,
+        "missing": False,
+        "total": len(blocks),
+        "words": sum(b.words for b in blocks),
+        "file_words": texparse.count_words(source),
+        **counts,
+    }
+
+
+def overview(state: dict) -> dict:
+    files = [file_summary(state, rel, title) for rel, title in file_order()]
+    present = [f for f in files if not f["missing"]]
+    candidates = find_root_candidates(MANUSCRIPT)
+    return {
+        "files": files,
+        "settings": state["settings"],
+        "models": AVAILABLE_MODELS,
+        "review_modes": REVIEW_MODES,
+        "manuscript": str(MANUSCRIPT),
+        "root_tex": ROOT_TEX.relative_to(MANUSCRIPT).as_posix() if ROOT_TEX else None,
+        "root_choices": [p.relative_to(MANUSCRIPT).as_posix() for p in candidates],
+        "style": (
+            os.path.relpath(style_path, MANUSCRIPT).replace("\\", "/")
+            if (style_path := style_guide_path()) else None
+        ),
+        "style_choices": available_styles(),
+        "usage": state["usage"],
+        "usage_by_model": state["usage_by_model"],
+        "totals": {
+            "prose_words": sum(f["words"] for f in present),
+            "document_words": sum(f["file_words"] for f in present),
+            "paragraphs": sum(f["total"] for f in present),
+            "done": sum(f["done"] for f in present),
+            "skipped": sum(f["skipped"] for f in present),
+            "pending": sum(f["pending"] for f in present),
+        },
+    }
+
+
+# --------------------------------------------------------------------------
+# API
+# --------------------------------------------------------------------------
+
+app = FastAPI(title="Dissertation rewrite")
+
+
+class ReviewRequest(BaseModel):
+    file: str
+    key: str
+    rewrite: str
+
+
+class AcceptRequest(BaseModel):
+    file: str
+    key: str
+    text: str
+    source: str = "mine"          # mine | corrected | overwrite
+    verdict: str | None = None
+
+
+class KeyRequest(BaseModel):
+    file: str
+    key: str
+
+
+class SettingsRequest(BaseModel):
+    word_limit: int | None = None
+    model: str | None = None
+    auto_commit: bool | None = None
+    style_guide: str | None = None
+    review_mode: str | None = None
+    hybrid_turns: int | None = None
+    session_turns: int | None = None
+
+
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse(APP_DIR / "index.html")
+
+
+@app.get("/api/overview")
+def api_overview() -> dict:
+    return overview(load_state())
+
+
+@app.get("/api/paragraphs")
+def api_paragraphs(file: str) -> dict:
+    state = load_state()
+    _, blocks = read_blocks(file)
+    items = []
+    for block in blocks:
+        status, record = status_of(state, file, block)
+        items.append({
+            "key": block.key,
+            "index": block.index,
+            "words": block.words,
+            "status": status,
+            "preview": texparse.normalise(texparse.strip_tex(block.text))[:110],
+            "source": (record or {}).get("source"),
+        })
+    return {"file": file, "paragraphs": items}
+
+
+@app.get("/api/paragraph")
+def api_paragraph(file: str, key: str) -> dict:
+    state = load_state()
+    _, block = find_block(file, key)
+    status, record = status_of(state, file, block)
+    return {
+        "file": file,
+        "key": block.key,
+        "index": block.index,
+        "text": block.text,
+        "words": block.words,
+        "status": status,
+        "record": record,
+    }
+
+
+@app.post("/api/review")
+def api_review(request: ReviewRequest) -> dict:
+    if not request.rewrite.strip():
+        raise HTTPException(400, "The rewrite is empty.")
+    state = load_state()
+    _, block = find_block(request.file, request.key)
+    settings = state["settings"]
+    turns = mode_turns(settings)
+    session = None
+    if turns:
+        REVIEW_SESSION.max_turns = turns
+        session = REVIEW_SESSION
+
+    try:
+        result = review(
+            original=block.text,
+            rewrite=request.rewrite,
+            relpath=request.file,
+            style_guide=style_guide_text(),
+            model=settings["model"],
+            cwd=REPO_ROOT,
+            session=session,
+        )
+    except ReviewError as exc:
+        if session is not None:
+            session.reset()          # a broken session must not poison the next review
+        raise HTTPException(502, str(exc)) from exc
+    result["words"] = {
+        "original": block.words,
+        "rewrite": texparse.count_words(request.rewrite),
+        "corrected": texparse.count_words(result["corrected"]),
+    }
+    with _lock:
+        state = load_state()
+        accumulate_usage(state, result.get("meta") or {})
+        save_state(state)
+        result["usage"] = state["usage"]
+    audit({"event": "review", "file": request.file, "key": request.key,
+           "verdict": result["verdict"], "summary": result.get("summary", ""),
+           "meta": result.get("meta")})
+    return result
+
+
+@app.post("/api/accept")
+def api_accept(request: AcceptRequest) -> dict:
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(400, "Refusing to write an empty paragraph.")
+
+    with _lock:
+        state = load_state()
+        source, block = find_block(request.file, request.key)
+        path = resolve(request.file)
+
+        # Checked before the write, so it reflects the author's own edits rather
+        # than the app's.
+        dirty_before = (
+            has_uncommitted_changes(request.file)
+            if state["settings"]["auto_commit"] else False
+        )
+
+        # Match the file's own hard-wrap column so the source stays consistent
+        # and the diff shows only the words that changed.
+        configured = state["settings"].get("wrap_width")
+        width = texparse.detect_wrap_width(source) if configured is None else int(configured)
+        text = texparse.rewrap(text, width)
+
+        before_words = block.words
+        after_words = texparse.count_words(text)
+        updated = texparse.splice(source, block, text)
+        write_source(path, updated)
+
+        rid = record_id(request.file, request.key)
+        existing = state["records"].get(rid, {})
+        state["records"][rid] = {
+            "file": request.file,
+            "status": "done",
+            "source": request.source,
+            "verdict": request.verdict,
+            "original": existing.get("original", block.text),
+            "final": text,
+            "final_key": texparse.content_key(text),
+            "words_before": existing.get("words_before", before_words),
+            "words_after": after_words,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        save_state(state)
+
+        commit = None
+        if state["settings"]["auto_commit"]:
+            if dirty_before:
+                # Committing now would fold the author's own unrelated edits into
+                # a "rewrite:" commit. The paragraph is written either way; only
+                # the commit is withheld.
+                commit = {
+                    "ok": False,
+                    "skipped": True,
+                    "detail": (
+                        f"Not committed. {request.file} already had uncommitted changes "
+                        f"of your own, and committing would have swept them in. "
+                        f"Your paragraph is written. Commit or stash that file, and "
+                        f"later paragraphs in it will commit cleanly."
+                    ),
+                }
+            else:
+                label = f"{request.file} P{block.index + 1}"
+                commit = git_commit(
+                    request.file,
+                    f"rewrite: {label} ({before_words} to {after_words} words, {request.source})",
+                )
+
+        audit({"event": "accept", "file": request.file, "key": request.key,
+               "source": request.source, "verdict": request.verdict,
+               "original": block.text, "final": text,
+               "words_before": before_words, "words_after": after_words,
+               "commit": commit})
+
+        return {"ok": True, "commit": commit, "words_before": before_words,
+                "words_after": after_words, "overview": overview(state)}
+
+
+@app.post("/api/skip")
+def api_skip(request: KeyRequest) -> dict:
+    with _lock:
+        state = load_state()
+        _, block = find_block(request.file, request.key)
+        rid = record_id(request.file, request.key)
+        record = state["records"].get(rid, {})
+        record.update({
+            "file": request.file, "status": "skipped",
+            "original": record.get("original", block.text),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+        state["records"][rid] = record
+        save_state(state)
+        audit({"event": "skip", "file": request.file, "key": request.key})
+        return {"ok": True, "overview": overview(state)}
+
+
+@app.post("/api/reopen")
+def api_reopen(request: KeyRequest) -> dict:
+    """Put a skipped or completed paragraph back in the queue.
+
+    The manuscript is not reverted. This only clears the bookkeeping, so an
+    accepted paragraph can be worked on again from its current text.
+    """
+    with _lock:
+        state = load_state()
+        _, block = find_block(request.file, request.key)
+        for rid in (record_id(request.file, request.key),
+                    record_id(request.file, block.key)):
+            state["records"].pop(rid, None)
+        save_state(state)
+        audit({"event": "reopen", "file": request.file, "key": request.key})
+        return {"ok": True, "overview": overview(state)}
+
+
+@app.post("/api/settings")
+def api_settings(request: SettingsRequest) -> dict:
+    with _lock:
+        state = load_state()
+        changes = request.model_dump(exclude_none=True)
+        for field, value in changes.items():
+            state["settings"][field] = value
+        save_state(state)
+        # A primed conversation carries the old model and style rules, so any
+        # change to them retires it rather than reusing a stale priming.
+        if {"model", "style_guide", "review_mode",
+            "hybrid_turns", "session_turns"} & set(changes):
+            REVIEW_SESSION.reset()
+        return {"ok": True, "settings": state["settings"]}
+
+
+@app.post("/api/wordcount")
+def api_wordcount(payload: dict) -> dict:
+    return {"words": texparse.count_words(payload.get("text", ""))}
+
+
+@app.get("/api/texcount")
+def api_texcount() -> dict:
+    """The authoritative word count, from texcount over the whole document.
+
+    The app's own counter is a fast approximation used for the live per-paragraph
+    figures. This is the number to trust against the limit, so it is reported
+    separately rather than silently replacing the estimate.
+    """
+    if not shutil.which("texcount"):
+        return {"available": False}
+    try:
+        completed = subprocess.run(
+            ["texcount", "-inc", "-total", "-q", "thesis.tex"],
+            cwd=str(MANUSCRIPT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"available": False, "error": str(exc)}
+
+    counts: dict[str, int] = {}
+    for line in completed.stdout.splitlines():
+        for label, field in (
+            ("Words in text:", "text"),
+            ("Words in headers:", "headers"),
+            ("Words outside text", "captions"),
+        ):
+            if line.startswith(label):
+                digits = "".join(c for c in line.split(":")[-1] if c.isdigit())
+                if digits:
+                    counts[field] = int(digits)
+    if "text" not in counts:
+        return {"available": False, "error": "texcount produced no total"}
+    counts["total"] = sum(counts.values())
+    return {"available": True, **counts}
+
+
+@app.exception_handler(HTTPException)
+def http_error(_request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse({"error": exc.detail}, status_code=exc.status_code)
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    print(f"Manuscript : {MANUSCRIPT}")
+    print(f"Repository : {REPO_ROOT}")
+    style = style_guide_path()
+    print(f"Style guide: {style if style else 'none (writing rules are optional)'}")
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")

@@ -1,0 +1,846 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dissertation rewrite</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1b1e24;
+    --panel-2: #21252c;
+    --line: #2c313a;
+    --text: #e4e7ec;
+    --muted: #8b94a3;
+    --accent: #6ea8fe;
+    --pass: #4ec98a;
+    --warn: #e0b155;
+    --fail: #e5766f;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: 7px 13px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .38; cursor: not-allowed; }
+  button.primary { background: #2b4b7d; border-color: #3a6099; }
+  button.good { background: #235c40; border-color: #2f7a55; }
+  button.danger { background: #5d2f2c; border-color: #7d403c; }
+  select {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px;
+  }
+  kbd {
+    font: 11px/1 var(--mono); color: var(--muted);
+    border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 2px 4px; margin-left: 6px;
+  }
+
+  /* ---- top bar ---- */
+  header {
+    display: flex; align-items: center; gap: 20px;
+    padding: 10px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--line); flex: 0 0 auto;
+  }
+  header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  .metrics { display: flex; gap: 18px; margin-left: auto; align-items: center; }
+  .metric { text-align: right; line-height: 1.25; }
+  .metric b { font: 600 15px/1.2 var(--mono); display: block; }
+  .metric span { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .over { color: var(--fail); }
+  .under { color: var(--pass); }
+
+  /* ---- layout ---- */
+  main { flex: 1; display: flex; min-height: 0; }
+  aside {
+    width: 264px; flex: 0 0 264px; background: var(--panel);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0;
+  }
+  .aside-head {
+    padding: 9px 12px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: .7px; color: var(--muted); border-bottom: 1px solid var(--line);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .files { overflow-y: auto; max-height: 38%; border-bottom: 1px solid var(--line); }
+  .file {
+    padding: 8px 12px; cursor: pointer; border-left: 3px solid transparent;
+    display: flex; justify-content: space-between; gap: 8px; align-items: baseline;
+  }
+  .file:hover { background: var(--panel-2); }
+  .file.active { background: var(--panel-2); border-left-color: var(--accent); }
+  .file small { color: var(--muted); font: 11px/1 var(--mono); white-space: nowrap; }
+  .paras { overflow-y: auto; flex: 1; }
+  .para {
+    padding: 7px 12px 7px 10px; cursor: pointer; border-left: 3px solid transparent;
+    display: flex; gap: 8px; align-items: baseline; font-size: 12.5px;
+  }
+  .para:hover { background: var(--panel-2); }
+  .para.active { background: #262c36; border-left-color: var(--accent); }
+  .para .n { font: 11px/1.4 var(--mono); color: var(--muted); flex: 0 0 26px; }
+  .para .t {
+    flex: 1; color: var(--muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+  .para.done .t { color: #5e8f74; text-decoration: line-through; text-decoration-thickness: 1px; }
+  .para.skipped .t { color: #8a7a4e; font-style: italic; }
+  .para .dot { flex: 0 0 6px; height: 6px; border-radius: 50%; background: var(--line); }
+  .para.done .dot { background: var(--pass); }
+  .para.skipped .dot { background: var(--warn); }
+
+  /* ---- editor ---- */
+  .work { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .cols { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  .col { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .col + .col { border-left: 1px solid var(--line); }
+  .col-head {
+    display: flex; align-items: center; gap: 10px; padding: 7px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); flex: 0 0 auto;
+  }
+  .col-head h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .7px;
+    color: var(--muted); margin: 0; font-weight: 600;
+  }
+  .wc { margin-left: auto; font: 12px/1 var(--mono); color: var(--muted); }
+  .wc b { color: var(--text); }
+  .delta { font: 11px/1 var(--mono); padding: 2px 5px; border-radius: 4px; background: var(--panel-2); }
+  .original, textarea {
+    flex: 1; overflow-y: auto; margin: 0; padding: 14px 16px;
+    font: 13.5px/1.72 var(--mono); white-space: pre-wrap; word-break: break-word;
+    background: transparent; color: var(--text); border: 0; resize: none;
+  }
+  .original { color: #cfd5de; }
+  textarea:focus { outline: none; background: #171a1f; }
+  textarea::placeholder { color: #4a515d; }
+
+  /* ---- review ---- */
+  .review {
+    flex: 0 0 auto; max-height: 42vh; overflow-y: auto;
+    border-top: 1px solid var(--line); background: var(--panel);
+  }
+  .verdict {
+    display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+  }
+  .badge {
+    font: 600 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .8px;
+    padding: 4px 8px; border-radius: 4px;
+  }
+  .badge.pass { background: #1e4634; color: var(--pass); }
+  .badge.warn { background: #4a3a1a; color: var(--warn); }
+  .badge.fail { background: #4d2725; color: var(--fail); }
+  .badge.error { background: #4d2725; color: var(--fail); }
+  .findings { padding: 4px 14px 12px; display: grid; gap: 10px; }
+  .group h3 {
+    font: 600 10.5px/1 var(--mono); text-transform: uppercase; letter-spacing: .8px;
+    color: var(--muted); margin: 8px 0 5px;
+  }
+  .findings ul { margin: 0; padding-left: 18px; }
+  .findings li { margin: 3px 0; }
+  .sev {
+    font: 600 9.5px/1 var(--mono); text-transform: uppercase; padding: 2px 4px;
+    border-radius: 3px; margin-right: 6px; background: var(--panel-2); color: var(--muted);
+  }
+  .sev.high { background: #4d2725; color: var(--fail); }
+  .findings code {
+    font: 12.5px/1.5 var(--mono); background: var(--panel-2);
+    padding: 1px 4px; border-radius: 3px;
+  }
+  .corrected {
+    font: 13px/1.7 var(--mono); background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .hint { color: var(--muted); padding: 14px; font-size: 13px; }
+
+  /* ---- mode sheet ---- */
+  .backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  .backdrop[hidden] { display: none; }
+  .sheet {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    width: min(940px, 94vw); max-height: 88vh; overflow-y: auto; padding: 0 0 18px;
+  }
+  .sheet-head {
+    display: flex; align-items: center; gap: 12px; padding: 16px 20px 12px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+  }
+  .sheet-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  .sheet-head button { margin-left: auto; padding: 4px 10px; }
+  .sheet-intro { margin: 14px 20px 4px; font-size: 13px; color: var(--text); max-width: 74ch; }
+  .sheet-foot { margin: 4px 20px 0; font-size: 12px; }
+  .muted { color: var(--muted); }
+  #mode-cards { display: grid; gap: 12px; padding: 12px 20px; }
+  .mode {
+    border: 1px solid var(--line); border-radius: 8px; padding: 13px 15px;
+    cursor: pointer; background: var(--panel-2);
+  }
+  .mode:hover { border-color: #3d4552; }
+  .mode.on { border-color: var(--accent); background: #1e2836; }
+  .mode-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .mode-top h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .mode-top .cost { margin-left: auto; font: 12px/1 var(--mono); color: var(--muted); }
+  .mode-top .cost b { color: var(--text); font-size: 13px; }
+  .mode .summary { margin: 5px 0 0; font-size: 12.5px; color: #b9c1cd; }
+  .mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 22px; margin: 10px 0 0; }
+  .mode-grid ul { margin: 3px 0 0; padding-left: 17px; }
+  .mode-grid li { margin: 3px 0; font-size: 12.5px; }
+  .mode-grid h4 {
+    margin: 0; font: 600 10.5px/1 var(--mono); letter-spacing: .7px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .mode-grid .good h4 { color: var(--pass); }
+  .mode-grid .bad h4 { color: var(--warn); }
+  .knob {
+    margin: 11px 0 0; padding-top: 10px; border-top: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  }
+  .knob input {
+    width: 62px; font: 13px/1 var(--mono); text-align: center; padding: 5px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--line); border-radius: 5px;
+  }
+  @media (max-width: 720px) { .mode-grid { grid-template-columns: 1fr; } }
+
+  /* ---- actions ---- */
+  .actions {
+    flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+    padding: 9px 14px; background: var(--panel); border-top: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .actions .spacer { margin-left: auto; }
+  .status { font-size: 12px; color: var(--muted); }
+  .spin { display: inline-block; animation: sp 1s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Dissertation rewrite</h1>
+  <span class="status" id="where">—</span>
+  <div class="metrics">
+    <div class="metric"><b id="m-progress">—</b><span>done / total</span></div>
+    <div class="metric"><b id="m-prose">—</b><span>prose words</span></div>
+    <div class="metric"><b id="m-doc">—</b><span>estimate / limit</span></div>
+    <div class="metric" id="m-texcount-wrap" style="cursor:pointer"
+         title="Authoritative count from texcount. Click to recount.">
+      <b id="m-texcount">—</b><span>texcount ⟳</span>
+    </div>
+    <div class="metric" id="m-usage-wrap" style="cursor:pointer" title="Click for the full breakdown">
+      <b id="m-usage">—</b><span>spent / tokens</span>
+    </div>
+    <button id="btn-modes" title="How the rules reach the reviewer">Mode: <b id="mode-label">—</b></button>
+    <select id="style-picker" title="Writing rules sent with every review"></select>
+    <select id="model-picker" title="Reviewer model"></select>
+    <button id="btn-settings" title="Word limit">Limit</button>
+  </div>
+</header>
+
+<div id="modes-backdrop" class="backdrop" hidden>
+  <div class="sheet" role="dialog" aria-label="Review mode">
+    <div class="sheet-head">
+      <h2>How the rules reach the reviewer</h2>
+      <button id="modes-close" title="Close">✕</button>
+    </div>
+    <p class="sheet-intro">
+      Every review needs the same rules: the writing checks, the JSON schema and your
+      style guide if you picked one. That text is most of what each review costs.
+      These modes differ only in how often it gets re-sent.
+      <span class="muted">Figures are measured over 24 paragraphs damaged identically
+      and reviewed by all three, not estimates.</span>
+    </p>
+    <div id="mode-cards"></div>
+    <p class="sheet-foot muted">
+      Changing anything here starts a new conversation, so the reviewer is never
+      working from rules you have since changed.
+    </p>
+  </div>
+</div>
+
+<main>
+  <aside>
+    <div class="aside-head">
+      <span>Files</span>
+      <span id="root-tex" style="text-transform:none;letter-spacing:0;font:11px/1 var(--mono)"></span>
+    </div>
+    <div class="files" id="files"></div>
+    <div class="aside-head">
+      <span id="paras-title">Paragraphs</span>
+      <label style="text-transform:none;letter-spacing:0;display:flex;gap:5px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="hide-done"> pending only
+      </label>
+    </div>
+    <div class="paras" id="paras"></div>
+  </aside>
+
+  <div class="work">
+    <div class="cols">
+      <div class="col">
+        <div class="col-head">
+          <h2>Original</h2>
+          <span class="wc">words <b id="wc-orig">0</b></span>
+        </div>
+        <div class="original" id="original"></div>
+      </div>
+      <div class="col">
+        <div class="col-head">
+          <h2>Your rewrite</h2>
+          <span class="delta" id="wc-delta">—</span>
+          <span class="wc">words <b id="wc-new">0</b></span>
+        </div>
+        <textarea id="rewrite" spellcheck="true"
+          placeholder="Write your version of the paragraph here. Keep the LaTeX commands (\citep, \ref, \textit) intact."></textarea>
+      </div>
+    </div>
+
+    <div class="review" id="review">
+      <div class="hint">
+        Write your version, then <b>Review</b> to have Claude check it for lost meaning,
+        grammar, LaTeX validity and machine-sounding phrasing.
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-copy" title="Copy the original into the editor as a starting point">Copy original<kbd>Ctrl K</kbd></button>
+      <button id="btn-review" class="primary">Review<kbd>Ctrl ⏎</kbd></button>
+      <button id="btn-accept" class="good" disabled>Accept mine<kbd>Ctrl S</kbd></button>
+      <button id="btn-accept-corrected" disabled>Accept corrected<kbd>Ctrl ⇧ S</kbd></button>
+      <button id="btn-overwrite" class="danger">Overwrite anyway</button>
+      <span class="spacer"></span>
+      <span class="status" id="status"></span>
+      <button id="btn-skip">Skip</button>
+      <button id="btn-reopen" title="Put this paragraph back in the queue">Reopen</button>
+      <button id="btn-prev" title="Previous paragraph">◀<kbd>Alt ←</kbd></button>
+      <button id="btn-next" title="Next paragraph">▶<kbd>Alt →</kbd></button>
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = {
+  files: [], settings: {}, totals: {},
+  file: null, paragraphs: [], key: null, current: null,
+  review: null, busy: false,
+};
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  const data = await response.json().catch(() => ({ error: response.statusText }));
+  if (!response.ok) throw new Error(data.error || response.statusText);
+  return data;
+}
+const post = (path, body) => api(path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+});
+
+function setStatus(text, spinning) {
+  $('status').innerHTML = spinning ? `<span class="spin">◐</span> ${text}` : (text || '');
+}
+function setBusy(value) {
+  state.busy = value;
+  ['btn-review', 'btn-accept', 'btn-accept-corrected', 'btn-overwrite', 'btn-skip', 'btn-reopen']
+    .forEach(id => { $(id).disabled = value; });
+  if (!value) syncButtons();
+}
+
+// ---------- rendering ----------
+
+function renderOverview(data) {
+  state.files = data.files;
+  state.settings = data.settings;
+  state.totals = data.totals;
+
+  const t = data.totals;
+  $('m-progress').textContent = `${t.done} / ${t.paragraphs}`;
+  $('m-prose').textContent = t.prose_words.toLocaleString();
+  const limit = data.settings.word_limit;
+  const doc = t.document_words;
+  $('m-doc').innerHTML =
+    `<span class="${doc > limit ? 'over' : 'under'}">${doc.toLocaleString()}</span>` +
+    `<span style="color:var(--muted)"> / ${limit.toLocaleString()}</span>`;
+
+  renderUsage(data.usage, data.usage_by_model);
+
+  // Chapter order comes from this file's \include lines. Show which one it is,
+  // and flag it when other candidates exist and the order might be wrong.
+  const rootEl = $('root-tex');
+  if (data.root_tex) {
+    const others = (data.root_choices || []).filter(c => c !== data.root_tex);
+    rootEl.textContent = data.root_tex + (others.length ? ` (+${others.length})` : '');
+    rootEl.style.color = others.length ? 'var(--warn)' : 'var(--muted)';
+    rootEl.title = others.length
+      ? `Chapter order is read from ${data.root_tex}.\n\n` +
+        `Other main files in this manuscript:\n  ${others.join('\n  ')}\n\n` +
+        `If the order below looks wrong, restart with --pick to choose a different one.`
+      : `Chapter order is read from ${data.root_tex}`;
+  } else {
+    rootEl.textContent = '';
+  }
+
+  const picker = $('model-picker');
+  if (data.models && picker.options.length !== data.models.length) {
+    picker.innerHTML = data.models
+      .map(m => `<option value="${m.id}" title="${m.note}">${m.label}</option>`).join('');
+  }
+  picker.value = data.settings.model;
+
+  renderModes(data);
+
+  // Writing rules are opt-in: with none selected the reviewer still checks
+  // meaning, grammar, LaTeX and machine-sounding phrasing.
+  const style = $('style-picker');
+  const options = ['<option value="none">Style: none</option>'];
+  for (const choice of data.style_choices || []) {
+    options.push(`<option value="${escapeAttr(choice)}">Style: ${escapeHtml(choice)}</option>`);
+  }
+  style.innerHTML = options.join('');
+  style.value = data.style || 'none';
+  if (data.style && !(data.style_choices || []).includes(data.style)) {
+    style.insertAdjacentHTML('beforeend',
+      `<option value="${escapeAttr(data.style)}" selected>Style: ${escapeHtml(data.style)}</option>`);
+    style.value = data.style;
+  }
+  style.title = data.style
+    ? `Sending the writing rules in ${data.style} with every review.`
+    : 'No writing rules sent. Meaning, grammar, LaTeX and AI-phrasing checks still run.';
+
+  $('files').innerHTML = data.files.map(f => {
+    if (f.missing) return `<div class="file" style="opacity:.4"><span>${f.title}</span><small>missing</small></div>`;
+    return `<div class="file ${f.file === state.file ? 'active' : ''}" data-file="${f.file}">
+      <span>${f.title}</span>
+      <small>${f.done}/${f.total} · ${f.words.toLocaleString()}w</small>
+    </div>`;
+  }).join('');
+  document.querySelectorAll('.file[data-file]').forEach(node => {
+    node.onclick = () => openFile(node.dataset.file);
+  });
+}
+
+function renderParagraphs() {
+  const pendingOnly = $('hide-done').checked;
+  const visible = state.paragraphs.filter(p => !pendingOnly || p.status === 'pending' || p.key === state.key);
+  $('paras-title').textContent = `Paragraphs (${state.paragraphs.filter(p => p.status === 'pending').length} pending)`;
+  $('paras').innerHTML = visible.map(p => `
+    <div class="para ${p.status} ${p.key === state.key ? 'active' : ''}" data-key="${p.key}">
+      <span class="dot"></span>
+      <span class="n">${p.index + 1}</span>
+      <span class="t" title="${escapeAttr(p.preview)}">${escapeHtml(p.preview)}</span>
+      <span class="n" style="flex:0 0 auto">${p.words}w</span>
+    </div>`).join('') || '<div class="hint">Nothing pending in this file.</div>';
+  document.querySelectorAll('.para[data-key]').forEach(node => {
+    node.onclick = () => openParagraph(node.dataset.key);
+  });
+  const active = document.querySelector('.para.active');
+  if (active) active.scrollIntoView({ block: 'nearest' });
+}
+
+const escapeHtml = s => (s || '').replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const escapeAttr = s => escapeHtml(s).replace(/"/g, '&quot;');
+
+function renderReview(result) {
+  state.review = result;
+  if (!result) {
+    $('review').innerHTML = '<div class="hint">Write your version, then <b>Review</b>.</div>';
+    syncButtons();
+    return;
+  }
+  if (result.errorMessage) {
+    $('review').innerHTML = `
+      <div class="verdict"><span class="badge error">error</span><span>${escapeHtml(result.errorMessage)}</span></div>`;
+    syncButtons();
+    return;
+  }
+
+  const list = (title, items, render) => items && items.length
+    ? `<div class="group"><h3>${title}</h3><ul>${items.map(render).join('')}</ul></div>` : '';
+  const sev = s => `<span class="sev ${s === 'high' ? 'high' : ''}">${s || 'low'}</span>`;
+
+  const w = result.words || {};
+  const deltaText = (a, b) => {
+    const d = b - a;
+    return `${b}w (${d > 0 ? '+' : ''}${d})`;
+  };
+
+  $('review').innerHTML = `
+    <div class="verdict">
+      <span class="badge ${result.verdict}">${result.verdict}</span>
+      <span>${escapeHtml(result.summary || '')}</span>
+      <span class="wc" style="margin-left:auto">
+        original ${w.original}w → yours ${deltaText(w.original, w.rewrite)}
+      </span>
+    </div>
+    <div class="findings">
+      ${list('Lost from the original', result.lost, i =>
+        `<li>${sev(i.severity)}${escapeHtml(i.item)}${i.where ? ` <code>${escapeHtml(i.where)}</code>` : ''}</li>`)}
+      ${list('Added, not in the original', result.added, i =>
+        `<li>${sev(i.severity)}${escapeHtml(i.item)}</li>`)}
+      ${list('Grammar', result.grammar, i =>
+        `<li><code>${escapeHtml(i.quote)}</code> — ${escapeHtml(i.issue)} → <code>${escapeHtml(i.fix)}</code></li>`)}
+      ${list('LaTeX', result.latex, i => `<li>${escapeHtml(i.item || i)}</li>`)}
+      ${result.voice && result.voice.sounds_ai
+        ? list('Reads as machine-written', result.voice.notes.map(n => ({ item: n })), i => `<li>${escapeHtml(i.item)}</li>`)
+        : (result.voice && result.voice.notes.length
+          ? list('Voice notes', result.voice.notes.map(n => ({ item: n })), i => `<li>${escapeHtml(i.item)}</li>`)
+          : '')}
+      ${result.corrected && result.corrected.trim() !== $('rewrite').value.trim() ? `
+        <div class="group">
+          <h3>Corrected version (${w.corrected}w) — your words, faults repaired</h3>
+          ${result.corrected_changes && result.corrected_changes.length
+            ? `<ul>${result.corrected_changes.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul>` : ''}
+          <div class="corrected">${escapeHtml(result.corrected)}</div>
+        </div>` : ''}
+    </div>`;
+  syncButtons();
+}
+
+function syncButtons() {
+  if (state.busy) return;
+  const hasText = $('rewrite').value.trim().length > 0;
+  const r = state.review;
+  const reviewed = r && !r.errorMessage;
+  $('btn-review').disabled = !hasText;
+  $('btn-accept').disabled = !reviewed || r.verdict === 'fail';
+  $('btn-accept-corrected').disabled = !reviewed || !r.corrected;
+  $('btn-overwrite').disabled = !hasText;
+  $('btn-accept').textContent = reviewed && r.verdict === 'warn' ? 'Accept mine (warn)' : 'Accept mine';
+}
+
+function updateCounts() {
+  const orig = state.current ? state.current.words : 0;
+  $('wc-orig').textContent = orig;
+  clearTimeout(updateCounts.timer);
+  updateCounts.timer = setTimeout(async () => {
+    const text = $('rewrite').value;
+    const { words } = await post('/api/wordcount', { text });
+    $('wc-new').textContent = words;
+    const d = words - orig;
+    const el = $('wc-delta');
+    el.textContent = text.trim() ? `${d > 0 ? '+' : ''}${d}` : '—';
+    el.className = 'delta ' + (!text.trim() ? '' : d > 0 ? 'over' : 'under');
+  }, 180);
+  syncButtons();
+}
+
+// ---------- navigation ----------
+
+async function refreshOverview() { renderOverview(await api('/api/overview')); }
+
+async function openFile(file, key) {
+  state.file = file;
+  const data = await api(`/api/paragraphs?file=${encodeURIComponent(file)}`);
+  state.paragraphs = data.paragraphs;
+  renderOverview({ files: state.files, settings: state.settings, totals: state.totals });
+  const target = key
+    || (state.paragraphs.find(p => p.status === 'pending') || state.paragraphs[0] || {}).key;
+  if (target) await openParagraph(target);
+  else { state.key = null; renderParagraphs(); }
+  localStorage.setItem('rewrite:file', file);
+}
+
+async function openParagraph(key) {
+  const data = await api(`/api/paragraph?file=${encodeURIComponent(state.file)}&key=${key}`);
+  state.key = key;
+  state.current = data;
+  $('original').textContent = data.text;
+  $('rewrite').value = (data.record && data.record.status === 'done' && data.record.final) || '';
+  const title = state.files.find(f => f.file === state.file);
+  $('where').textContent =
+    `${title ? title.title : state.file} · paragraph ${data.index + 1} of ${state.paragraphs.length} · ${data.status}`;
+  renderReview(null);
+  renderParagraphs();
+  updateCounts();
+  $('rewrite').focus();
+}
+
+function step(direction) {
+  const i = state.paragraphs.findIndex(p => p.key === state.key);
+  const next = state.paragraphs[i + direction];
+  if (next) openParagraph(next.key);
+}
+
+async function advance() {
+  await refreshOverview();
+  const data = await api(`/api/paragraphs?file=${encodeURIComponent(state.file)}`);
+  state.paragraphs = data.paragraphs;
+  const i = state.paragraphs.findIndex(p => p.key === state.key);
+  const following = state.paragraphs.slice(i + 1).find(p => p.status === 'pending');
+  if (following) return openParagraph(following.key);
+  const nextFile = state.files.find(f => !f.missing && f.pending > 0 && f.file !== state.file);
+  if (nextFile) { setStatus(`Moving to ${nextFile.title}`); return openFile(nextFile.file); }
+  renderParagraphs();
+  setStatus('Nothing pending left.');
+}
+
+// ---------- actions ----------
+
+async function doReview() {
+  setBusy(true); setStatus('Reviewing', true);
+  try {
+    const result = await post('/api/review', {
+      file: state.file, key: state.key, rewrite: $('rewrite').value,
+    });
+    renderReview(result);
+    renderUsage(result.usage, state.usageByModel);
+    const m = result.meta || {};
+    setStatus(m.cost_usd
+      ? `${m.model} · $${m.cost_usd.toFixed(4)} · ${(m.duration_ms / 1000).toFixed(0)}s`
+      : '');
+  } catch (error) {
+    renderReview({ errorMessage: error.message });
+    setStatus('');
+  } finally { setBusy(false); }
+}
+
+async function accept(source) {
+  const text = source === 'corrected' ? state.review.corrected : $('rewrite').value;
+  if (source === 'overwrite' && state.review && state.review.verdict === 'fail') {
+    const losses = (state.review.lost || []).filter(l => l.severity === 'high').map(l => l.item);
+    const message = losses.length
+      ? `The reviewer says this drops:\n\n· ${losses.join('\n· ')}\n\nWrite it anyway?`
+      : 'The reviewer failed this rewrite. Write it anyway?';
+    if (!confirm(message)) return;
+  }
+  setBusy(true); setStatus('Writing and committing', true);
+  try {
+    const result = await post('/api/accept', {
+      file: state.file, key: state.key, text, source,
+      verdict: state.review ? state.review.verdict : null,
+    });
+    const commit = result.commit;
+    if (commit && commit.skipped) {
+      setStatus('Written, not committed — see the notice');
+      alert(commit.detail);
+    } else {
+      setStatus(commit
+        ? (commit.ok ? `Committed ${commit.sha}` : `Written, but git said: ${commit.detail}`)
+        : 'Written');
+    }
+    renderOverview(result.overview);
+    await advance();
+    refreshTexcount();          // deliberately not awaited, it takes a second
+  } catch (error) {
+    setStatus(`Failed: ${error.message}`);
+  } finally { setBusy(false); }
+}
+
+async function skip() {
+  setBusy(true);
+  try {
+    const result = await post('/api/skip', { file: state.file, key: state.key });
+    renderOverview(result.overview);
+    setStatus('Skipped');
+    await advance();
+  } finally { setBusy(false); }
+}
+
+async function reopen() {
+  setBusy(true);
+  try {
+    const result = await post('/api/reopen', { file: state.file, key: state.key });
+    renderOverview(result.overview);
+    const data = await api(`/api/paragraphs?file=${encodeURIComponent(state.file)}`);
+    state.paragraphs = data.paragraphs;
+    await openParagraph(state.key);
+    setStatus('Back in the queue');
+  } finally { setBusy(false); }
+}
+
+function renderModes(data) {
+  const modes = data.review_modes || [];
+  const current = data.settings.review_mode || 'hybrid';
+  const active = modes.find(m => m.id === current) || {};
+
+  // Header button: the mode plus the number that defines it, so the setting is
+  // legible without opening anything.
+  const turns = active.knob ? data.settings[active.knob.setting] : null;
+  $('mode-label').textContent = active.label
+    ? active.label + (turns ? ` / ${turns}` : '')
+    : current;
+  $('btn-modes').title = active.summary || '';
+
+  const left = state.totals ? state.totals.pending : 0;
+  $('mode-cards').innerHTML = modes.map(m => {
+    const on = m.id === current;
+    const projected = left && m.cost ? ` · about $${(m.cost * left).toFixed(2)} for the ${left} left` : '';
+    const knob = (on && m.knob) ? `
+      <div class="knob">
+        <label for="knob-${m.id}">${escapeHtml(m.knob.label)}</label>
+        <input id="knob-${m.id}" type="number" value="${data.settings[m.knob.setting]}"
+               min="${m.knob.min}" max="${m.knob.max}" data-setting="${m.knob.setting}">
+        <span>${escapeHtml(m.knob.suffix)}</span>
+        <span class="muted">
+          ${m.id === 'hybrid'
+            ? 'Lower re-reads the rules more often and costs a little more.'
+            : 'Higher means more accumulated context and a steeper cost climb.'}
+        </span>
+      </div>` : '';
+    return `
+      <div class="mode ${on ? 'on' : ''}" data-mode="${m.id}">
+        <div class="mode-top">
+          <h3>${escapeHtml(m.label)}</h3>
+          ${on ? '<span class="muted" style="font-size:11.5px">in use</span>' : ''}
+          <span class="cost"><b>$${m.cost.toFixed(4)}</b>/review${projected}</span>
+        </div>
+        <p class="summary">${escapeHtml(m.summary)}</p>
+        <div class="mode-grid">
+          <div class="good"><h4>For</h4><ul>${m.pros.map(p => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>
+          <div class="bad"><h4>Against</h4><ul>${m.cons.map(c => `<li>${escapeHtml(c)}</li>`).join('')}</ul></div>
+        </div>
+        ${knob}
+      </div>`;
+  }).join('');
+
+  document.querySelectorAll('.mode[data-mode]').forEach(card => {
+    card.onclick = event => {
+      if (event.target.closest('.knob')) return;   // the number input is not a mode switch
+      const mode = card.dataset.mode;
+      if (mode === current) return;
+      post('/api/settings', { review_mode: mode })
+        .then(refreshOverview)
+        .then(() => setStatus(`Review mode: ${mode}`));
+    };
+  });
+  document.querySelectorAll('.knob input[data-setting]').forEach(input => {
+    input.onchange = () => {
+      const value = Math.max(Number(input.min), Math.min(Number(input.max), Number(input.value) || 0));
+      input.value = value;
+      post('/api/settings', { [input.dataset.setting]: value })
+        .then(refreshOverview)
+        .then(() => setStatus(`Rules re-sent every ${value} reviews`));
+    };
+  });
+}
+
+const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M'
+  : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n);
+
+function renderUsage(usage, byModel) {
+  if (!usage) return;
+  state.usage = usage;
+  state.usageByModel = byModel || {};
+  const billed = usage.input_tokens + usage.output_tokens + usage.cache_write_tokens;
+  $('m-usage').innerHTML = usage.reviews
+    ? `$${usage.cost_usd.toFixed(2)}<span style="color:var(--muted);font-size:12px"> · ${compact(billed)}</span>`
+    : '—';
+
+  const done = state.totals ? state.totals.done + state.totals.skipped : 0;
+  const left = state.totals ? state.totals.paragraphs - done : 0;
+  const perReview = usage.reviews ? usage.cost_usd / usage.reviews : 0;
+  const lines = [
+    `${usage.reviews} reviews, $${usage.cost_usd.toFixed(4)} total`,
+    usage.reviews ? `$${perReview.toFixed(4)} and ${Math.round(usage.duration_ms / usage.reviews / 1000)}s each` : '',
+    usage.reviews && left ? `about $${(perReview * left).toFixed(2)} to finish the remaining ${left}` : '',
+    '',
+    `input        ${usage.input_tokens.toLocaleString()}`,
+    `output       ${usage.output_tokens.toLocaleString()}`,
+    `cache write  ${usage.cache_write_tokens.toLocaleString()}`,
+    `cache read   ${usage.cache_read_tokens.toLocaleString()}  (billed at a tenth)`,
+    '',
+    ...Object.entries(state.usageByModel).map(([m, u]) =>
+      `${m}: ${u.reviews} reviews, $${u.cost_usd.toFixed(4)}`),
+  ];
+  $('m-usage-wrap').title = lines.filter(l => l !== undefined).join('\n');
+}
+
+async function refreshTexcount() {
+  $('m-texcount').textContent = '…';
+  try {
+    const data = await api('/api/texcount');
+    if (!data.available) { $('m-texcount').textContent = 'n/a'; return; }
+    const limit = state.settings.word_limit;
+    $('m-texcount').innerHTML =
+      `<span class="${data.total > limit ? 'over' : 'under'}">${data.total.toLocaleString()}</span>`;
+    $('m-texcount-wrap').title =
+      `texcount: ${data.text.toLocaleString()} in text, ` +
+      `${(data.headers || 0).toLocaleString()} in headers, ` +
+      `${(data.captions || 0).toLocaleString()} in captions. Click to recount.`;
+  } catch { $('m-texcount').textContent = 'n/a'; }
+}
+
+function settings() {
+  const limit = prompt('Word limit for the whole document', state.settings.word_limit);
+  if (limit === null) return;
+  const parsed = parseInt(limit, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return;
+  post('/api/settings', { word_limit: parsed }).then(refreshOverview);
+}
+
+// ---------- wiring ----------
+
+$('btn-review').onclick = doReview;
+$('btn-accept').onclick = () => accept('mine');
+$('btn-accept-corrected').onclick = () => accept('corrected');
+$('btn-overwrite').onclick = () => accept('overwrite');
+$('btn-skip').onclick = skip;
+$('btn-reopen').onclick = reopen;
+$('btn-prev').onclick = () => step(-1);
+$('btn-next').onclick = () => step(1);
+$('btn-settings').onclick = settings;
+$('m-texcount-wrap').onclick = refreshTexcount;
+const showModes = show => { $('modes-backdrop').hidden = !show; };
+$('btn-modes').onclick = () => showModes(true);
+$('modes-close').onclick = () => showModes(false);
+$('modes-backdrop').onclick = event => {
+  if (event.target === $('modes-backdrop')) showModes(false);
+};
+$('style-picker').onchange = event => {
+  post('/api/settings', { style_guide: event.target.value })
+    .then(refreshOverview)
+    .then(() => setStatus(event.target.value === 'none'
+      ? 'No writing rules will be sent'
+      : `Writing rules from ${event.target.value}`));
+};
+$('model-picker').onchange = event => {
+  post('/api/settings', { model: event.target.value })
+    .then(() => setStatus(`Reviewer model is now ${event.target.value}`));
+};
+$('m-usage-wrap').onclick = () => alert($('m-usage-wrap').title);
+$('btn-copy').onclick = () => {
+  $('rewrite').value = state.current.text;
+  updateCounts(); $('rewrite').focus();
+};
+$('rewrite').oninput = () => { if (state.review) renderReview(null); updateCounts(); };
+$('hide-done').onchange = renderParagraphs;
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('modes-backdrop').hidden) { showModes(false); return; }
+  const ctrl = event.ctrlKey || event.metaKey;
+  if (ctrl && event.key === 'Enter') { event.preventDefault(); if (!$('btn-review').disabled) doReview(); }
+  else if (ctrl && event.shiftKey && event.key.toLowerCase() === 's') {
+    event.preventDefault(); if (!$('btn-accept-corrected').disabled) accept('corrected');
+  } else if (ctrl && event.key.toLowerCase() === 's') {
+    event.preventDefault(); if (!$('btn-accept').disabled) accept('mine');
+  } else if (ctrl && event.key.toLowerCase() === 'k') {
+    event.preventDefault(); $('btn-copy').click();
+  } else if (event.altKey && event.key === 'ArrowRight') { event.preventDefault(); step(1); }
+  else if (event.altKey && event.key === 'ArrowLeft') { event.preventDefault(); step(-1); }
+});
+
+window.addEventListener('beforeunload', event => {
+  if ($('rewrite').value.trim() && !state.busy) { event.preventDefault(); event.returnValue = ''; }
+});
+
+(async function start() {
+  await refreshOverview();
+  const remembered = localStorage.getItem('rewrite:file');
+  const first = state.files.find(f => f.file === remembered && !f.missing)
+    || state.files.find(f => !f.missing && f.pending > 0)
+    || state.files.find(f => !f.missing);
+  if (first) await openFile(first.file);
+  refreshTexcount();
+})();
+</script>
+</body>
+</html>

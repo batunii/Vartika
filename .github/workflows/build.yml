@@ -1,0 +1,135 @@
+name: Build binaries
+
+# Builds a standalone binary for each platform. PyInstaller cannot
+# cross-compile, so each one is built on its own runner.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+            artifact: Vartika-windows
+            binary: dist/Vartika.exe
+          - os: macos-latest
+            name: macOS (Apple silicon)
+            artifact: Vartika-macos-arm64
+            binary: dist/Vartika
+          - os: macos-13
+            name: macOS (Intel)
+            artifact: Vartika-macos-x86_64
+            binary: dist/Vartika
+          - os: ubuntu-latest
+            name: Linux
+            artifact: Vartika-linux
+            binary: dist/Vartika
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # tkinter ships with the python.org and Homebrew builds but not with the
+      # bare Ubuntu runner. Without it the folder chooser cannot open.
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Check it imports and parses
+        run: |
+          python -c "import app, launcher, reviewer, texparse; print('imports ok')"
+          python -m compileall -q app.py launcher.py reviewer.py texparse.py build.py
+
+      - name: Build
+        run: python build.py
+
+      - name: Smoke test the binary
+        shell: bash
+        run: |
+          set -e
+          mkdir -p sample/content
+          printf '\\documentclass{report}\n\\begin{document}\n\\include{content/one}\n\\end{document}\n' > sample/main.tex
+          printf '\\chapter{First}\n\nThis is a paragraph long enough to be treated as prose by the parser, with several words in it so it passes the minimum length check comfortably.\n' > sample/content/one.tex
+          python -c "
+          import app
+          from pathlib import Path
+          m = Path('sample').resolve()
+          app.configure(manuscript=m, repo_root=m, data_dir=Path('sample-data'))
+          files = app.file_order()
+          assert files, 'no files discovered'
+          blocks = app.read_blocks(files[1][0])[1]
+          assert blocks, 'no paragraphs found'
+          print('parsed', len(files), 'files,', len(blocks), 'paragraph(s)')
+          "
+
+      - name: Mark executable (macOS, Linux)
+        if: runner.os != 'Windows'
+        run: chmod +x ${{ matrix.binary }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.binary }}
+          if-no-files-found: error
+
+  release:
+    name: Attach binaries to release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # Artifacts arrive in per-platform folders and all the non-Windows ones
+      # are called "Vartika", so they are renamed before upload.
+      - name: Collect
+        run: |
+          mkdir -p release
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            file=$(find "$dir" -type f | head -1)
+            case "$file" in
+              *.exe) cp "$file" "release/$name.exe" ;;
+              *)     cp "$file" "release/$name" ; chmod +x "release/$name" ;;
+            esac
+          done
+          ls -la release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          body: |
+            Download the binary for your platform and run it.
+
+            **You also need [Claude Code](https://claude.com/claude-code) installed
+            and logged in** — Vartika runs it to review your rewrites, so it uses
+            your own Claude account. It cannot be bundled.
+
+            **macOS:** the binary is unsigned, so Gatekeeper will block the first
+            run. Right-click it, choose Open, then confirm. Or run
+            `xattr -d com.apple.quarantine ./Vartika-macos-*` once.
+
+            **Linux:** `chmod +x Vartika-linux` if the download loses the flag.

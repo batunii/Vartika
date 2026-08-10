@@ -1,0 +1,14 @@
+# Build output
+build/
+dist/
+*.spec
+__pycache__/
+*.pyc
+
+# Runtime state, never belongs in the repo
+state.json
+audit.jsonl
+compare-results.json
+server.log
+server.err
+.rewrite-progress/
