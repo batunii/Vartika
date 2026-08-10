@@ -363,6 +363,12 @@ REVIEW_SESSION = reviewer.ReviewSession()
 
 _lock = threading.Lock()
 
+# Reviews may now be started from one paragraph and collected from another, so
+# several can be in flight. They are still run one at a time: session modes
+# resume a single conversation, and two overlapping resumes would interleave
+# turns in it. Queueing keeps the editor responsive without that risk.
+_review_lock = threading.Lock()
+
 
 # --------------------------------------------------------------------------
 # State
@@ -906,15 +912,16 @@ def api_review(request: ReviewRequest) -> dict:
         session = REVIEW_SESSION
 
     try:
-        result = review(
-            original=block.text,
-            rewrite=request.rewrite,
-            relpath=request.file,
-            style_guide=style_guide_text(),
-            model=settings["model"],
-            cwd=REPO_ROOT,
-            session=session,
-        )
+        with _review_lock:
+            result = review(
+                original=block.text,
+                rewrite=request.rewrite,
+                relpath=request.file,
+                style_guide=style_guide_text(),
+                model=settings["model"],
+                cwd=REPO_ROOT,
+                session=session,
+            )
     except ReviewError as exc:
         if session is not None:
             session.reset()          # a broken session must not poison the next review

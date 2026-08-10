@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Dissertation rewrite</title>
+<title>Vartika</title>
 <style>
   :root {
     --bg: #14161a;
@@ -52,6 +52,13 @@
     border-bottom: 1px solid var(--line); flex: 0 0 auto;
   }
   header h1 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: .2px; }
+  #btn-open {
+    display: flex; align-items: center; gap: 7px; max-width: 300px;
+    padding: 5px 10px; font-size: 12.5px;
+  }
+  #btn-open b { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #btn-open .folder { opacity: .75; }
+  #btn-open .caret { color: var(--muted); font-size: 10px; }
   .metrics { display: flex; gap: 18px; margin-left: auto; align-items: center; }
   .metric { text-align: right; line-height: 1.25; }
   .metric b { font: 600 15px/1.2 var(--mono); display: block; }
@@ -95,6 +102,16 @@
   .para .dot { flex: 0 0 6px; height: 6px; border-radius: 50%; background: var(--line); }
   .para.done .dot { background: var(--pass); }
   .para.skipped .dot { background: var(--warn); }
+  .para .mark { font: 11px/1.4 var(--mono); color: var(--muted); flex: 0 0 auto; }
+  .para.drafted .mark { color: var(--accent); }
+  .para.reviewing .mark { color: var(--accent); }
+  .para.ready .mark { font-weight: 600; }
+  .para.ready.pass .mark { color: var(--pass); }
+  .para.ready.warn .mark { color: var(--warn); }
+  .para.ready.fail .mark { color: var(--fail); }
+  /* A finished review the author has not looked at yet is worth noticing. */
+  .para.ready:not(.active) { background: #1d232c; }
+  .badge.running { background: #23384f; color: var(--accent); }
 
   /* ---- editor ---- */
   .work { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -274,7 +291,10 @@
 <body>
 
 <header>
-  <h1>Dissertation rewrite</h1>
+  <h1>Vartika</h1>
+  <button id="btn-open" title="Open a different manuscript">
+    <span class="folder">📁</span><b id="open-name">—</b><span class="caret">▾</span>
+  </button>
   <span class="status" id="where">—</span>
   <div class="metrics">
     <div class="metric"><b id="m-progress">—</b><span>done / total</span></div>
@@ -296,6 +316,7 @@
 
 <div id="setup" hidden>
   <div class="setup-inner">
+    <button id="setup-cancel" hidden>← Back to what I was doing</button>
     <h1>Which manuscript?</h1>
     <p class="setup-lead">
       Choose the folder holding your LaTeX files — the one containing the main
@@ -392,9 +413,8 @@
     <div class="actions">
       <button id="btn-copy" title="Copy the original into the editor as a starting point">Copy original<kbd>Ctrl K</kbd></button>
       <button id="btn-review" class="primary">Review<kbd>Ctrl ⏎</kbd></button>
-      <button id="btn-accept" class="good" disabled>Accept mine<kbd>Ctrl S</kbd></button>
+      <button id="btn-accept" class="good" disabled>Accept as written<kbd>Ctrl S</kbd></button>
       <button id="btn-accept-corrected" disabled>Accept corrected<kbd>Ctrl ⇧ S</kbd></button>
-      <button id="btn-overwrite" class="danger">Overwrite anyway</button>
       <span class="spacer"></span>
       <span class="status" id="status"></span>
       <button id="btn-skip">Skip</button>
@@ -410,8 +430,23 @@ const $ = id => document.getElementById(id);
 const state = {
   files: [], settings: {}, totals: {},
   file: null, paragraphs: [], key: null, current: null,
-  review: null, busy: false,
+  review: null, busy: false, configured: true,
+  // Your text and your reviews, kept per paragraph so you can start one
+  // reviewing, move on, and come back to it.
+  drafts: {},      // key -> text you have typed
+  reviews: {},     // key -> {status: 'running'|'done'|'error', result, error, at}
 };
+
+const draftKey = key => `${state.file}::${key}`;
+
+function saveDraft() {
+  if (!state.key) return;
+  const text = $('rewrite').value;
+  if (text.trim()) state.drafts[draftKey(state.key)] = text;
+  else delete state.drafts[draftKey(state.key)];
+}
+
+const reviewFor = key => state.reviews[draftKey(key)];
 
 async function api(path, options) {
   const response = await fetch(path, options);
@@ -426,6 +461,9 @@ const setupState = { browsePath: null, browseIsManuscript: false };
 
 function showSetup(show) {
   $('setup').hidden = !show;
+  // Escaping is only offered once a manuscript is open; on the very first run
+  // there is nothing to go back to.
+  $('setup-cancel').hidden = !state.configured;
   if (show) loadSetup();
 }
 
@@ -536,7 +574,7 @@ function setStatus(text, spinning) {
 }
 function setBusy(value) {
   state.busy = value;
-  ['btn-review', 'btn-accept', 'btn-accept-corrected', 'btn-overwrite', 'btn-skip', 'btn-reopen']
+  ['btn-accept', 'btn-accept-corrected', 'btn-skip', 'btn-reopen']
     .forEach(id => { $(id).disabled = value; });
   if (!value) syncButtons();
 }
@@ -544,6 +582,7 @@ function setBusy(value) {
 // ---------- rendering ----------
 
 function renderOverview(data) {
+  state.configured = data.configured !== false;
   state.files = data.files;
   state.settings = data.settings;
   state.totals = data.totals;
@@ -582,6 +621,12 @@ function renderOverview(data) {
   }
   picker.value = data.settings.model;
 
+  if (data.manuscript) {
+    const parts = data.manuscript.replace(/[\\/]+$/, '').split(/[\\/]/);
+    $('open-name').textContent = parts[parts.length - 1] || data.manuscript;
+    $('btn-open').title = `${data.manuscript}\n\nClick to open a different manuscript.`;
+  }
+
   renderModes(data);
 
   // Writing rules are opt-in: with none selected the reviewer still checks
@@ -618,13 +663,23 @@ function renderParagraphs() {
   const pendingOnly = $('hide-done').checked;
   const visible = state.paragraphs.filter(p => !pendingOnly || p.status === 'pending' || p.key === state.key);
   $('paras-title').textContent = `Paragraphs (${state.paragraphs.filter(p => p.status === 'pending').length} pending)`;
-  $('paras').innerHTML = visible.map(p => `
-    <div class="para ${p.status} ${p.key === state.key ? 'active' : ''}" data-key="${p.key}">
+  $('paras').innerHTML = visible.map(p => {
+    const held = reviewFor(p.key);
+    const drafted = state.drafts[draftKey(p.key)] !== undefined;
+    let mark = `${p.words}w`;
+    let cls = '';
+    if (held && held.status === 'running') { mark = '<span class="spin">◐</span>'; cls = 'reviewing'; }
+    else if (held && held.status === 'done') { mark = `✓ ${held.result.verdict}`; cls = `ready ${held.result.verdict}`; }
+    else if (held && held.status === 'error') { mark = '!'; cls = 'ready fail'; }
+    else if (drafted) { mark = '✎'; cls = 'drafted'; }
+    return `
+    <div class="para ${p.status} ${cls} ${p.key === state.key ? 'active' : ''}" data-key="${p.key}">
       <span class="dot"></span>
       <span class="n">${p.index + 1}</span>
       <span class="t" title="${escapeAttr(p.preview)}">${escapeHtml(p.preview)}</span>
-      <span class="n" style="flex:0 0 auto">${p.words}w</span>
-    </div>`).join('') || '<div class="hint">Nothing pending in this file.</div>';
+      <span class="mark">${mark}</span>
+    </div>`;
+  }).join('') || '<div class="hint">Nothing pending in this file.</div>';
   document.querySelectorAll('.para[data-key]').forEach(node => {
     node.onclick = () => openParagraph(node.dataset.key);
   });
@@ -694,13 +749,30 @@ function renderReview(result) {
 function syncButtons() {
   if (state.busy) return;
   const hasText = $('rewrite').value.trim().length > 0;
+  const held = state.key ? reviewFor(state.key) : null;
+  const running = held && held.status === 'running';
   const r = state.review;
   const reviewed = r && !r.errorMessage;
-  $('btn-review').disabled = !hasText;
-  $('btn-accept').disabled = !reviewed || r.verdict === 'fail';
+
+  $('btn-review').disabled = !hasText || running;
+  $('btn-review').textContent = running ? 'Reviewing…' : 'Review';
+
+  // Accept is never gated on having reviewed. Writing a paragraph you are
+  // happy with should not require asking permission first.
+  $('btn-accept').disabled = !hasText;
+  $('btn-accept').textContent =
+    !reviewed ? 'Accept as written'
+      : r.verdict === 'fail' ? 'Accept anyway'
+        : r.verdict === 'warn' ? 'Accept mine (warn)'
+          : 'Accept mine';
+  $('btn-accept').className = reviewed && r.verdict === 'fail' ? 'danger' : 'good';
+  $('btn-accept').title = !reviewed
+    ? 'Write your text as it stands. No review needed.'
+    : r.verdict === 'fail'
+      ? 'The reviewer failed this. You will be asked to confirm.'
+      : 'Write your text.';
+
   $('btn-accept-corrected').disabled = !reviewed || !r.corrected;
-  $('btn-overwrite').disabled = !hasText;
-  $('btn-accept').textContent = reviewed && r.verdict === 'warn' ? 'Accept mine (warn)' : 'Accept mine';
 }
 
 function updateCounts() {
@@ -736,15 +808,27 @@ async function openFile(file, key) {
 }
 
 async function openParagraph(key) {
+  saveDraft();                       // never lose what is in the editor
   const data = await api(`/api/paragraph?file=${encodeURIComponent(state.file)}&key=${key}`);
   state.key = key;
   state.current = data;
   $('original').textContent = data.text;
-  $('rewrite').value = (data.record && data.record.status === 'done' && data.record.final) || '';
+  const draft = state.drafts[draftKey(key)];
+  $('rewrite').value = draft !== undefined
+    ? draft
+    : (data.record && data.record.status === 'done' && data.record.final) || '';
   const title = state.files.find(f => f.file === state.file);
   $('where').textContent =
     `${title ? title.title : state.file} · paragraph ${data.index + 1} of ${state.paragraphs.length} · ${data.status}`;
-  renderReview(null);
+
+  // A review started earlier for this paragraph is shown again, whether it has
+  // come back yet or not.
+  const held = reviewFor(key);
+  if (!held) renderReview(null);
+  else if (held.status === 'running') renderReviewPending();
+  else if (held.status === 'error') renderReview({ errorMessage: held.error });
+  else renderReview(held.result);
+
   renderParagraphs();
   updateCounts();
   $('rewrite').focus();
@@ -771,39 +855,89 @@ async function advance() {
 
 // ---------- actions ----------
 
-async function doReview() {
-  setBusy(true); setStatus('Reviewing', true);
-  try {
-    const result = await post('/api/review', {
-      file: state.file, key: state.key, rewrite: $('rewrite').value,
-    });
-    renderReview(result);
-    renderUsage(result.usage, state.usageByModel);
-    const m = result.meta || {};
-    setStatus(m.cost_usd
-      ? `${m.model} · $${m.cost_usd.toFixed(4)} · ${(m.duration_ms / 1000).toFixed(0)}s`
-      : '');
-  } catch (error) {
-    renderReview({ errorMessage: error.message });
-    setStatus('');
-  } finally { setBusy(false); }
+function renderReviewPending() {
+  $('review').innerHTML = `
+    <div class="verdict">
+      <span class="badge running"><span class="spin">◐</span> reviewing</span>
+      <span>Still checking. Move on to the next paragraph if you like —
+        this comes back on its own and waits for you here.</span>
+    </div>`;
+  syncButtons();
+}
+
+// The review runs in the background: the paragraph it belongs to is captured
+// up front, so the answer lands against that paragraph however far away you
+// have wandered by the time it arrives.
+function doReview() {
+  const file = state.file;
+  const key = state.key;
+  const text = $('rewrite').value;
+  if (!text.trim()) return;
+
+  const id = `${file}::${key}`;
+  state.reviews[id] = { status: 'running', at: Date.now() };
+  if (state.key === key) renderReviewPending();
+  renderParagraphs();
+  setStatus('Reviewing in the background', true);
+
+  post('/api/review', { file, key, rewrite: text })
+    .then(result => {
+      state.reviews[id] = { status: 'done', result, at: Date.now() };
+      renderUsage(result.usage, state.usageByModel);
+      const m = result.meta || {};
+      const cost = m.cost_usd
+        ? `${m.model} · $${m.cost_usd.toFixed(4)} · ${(m.duration_ms / 1000).toFixed(0)}s`
+        : '';
+      if (state.key === key && state.file === file) {
+        renderReview(result);
+        setStatus(cost);
+      } else {
+        setStatus(`Review ready for paragraph ${paragraphNumber(file, key)} · ${result.verdict}`);
+      }
+    })
+    .catch(error => {
+      state.reviews[id] = { status: 'error', error: error.message, at: Date.now() };
+      if (state.key === key && state.file === file) renderReview({ errorMessage: error.message });
+      setStatus(`Review failed: ${error.message}`);
+    })
+    .then(() => { renderParagraphs(); syncButtons(); });
+}
+
+function paragraphNumber(file, key) {
+  if (file !== state.file) return '?';
+  const row = state.paragraphs.find(p => p.key === key);
+  return row ? row.index + 1 : '?';
 }
 
 async function accept(source) {
   const text = source === 'corrected' ? state.review.corrected : $('rewrite').value;
-  if (source === 'overwrite' && state.review && state.review.verdict === 'fail') {
+  const key = state.key;
+  const file = state.file;
+
+  // Only a failed review interrupts, and only to say what it thinks is being
+  // lost. Accepting an unreviewed paragraph asks nothing.
+  if (source !== 'corrected' && state.review && state.review.verdict === 'fail') {
     const losses = (state.review.lost || []).filter(l => l.severity === 'high').map(l => l.item);
     const message = losses.length
       ? `The reviewer says this drops:\n\n· ${losses.join('\n· ')}\n\nWrite it anyway?`
       : 'The reviewer failed this rewrite. Write it anyway?';
     if (!confirm(message)) return;
   }
-  setBusy(true); setStatus('Writing and committing', true);
+
+  const held = reviewFor(key);
+  if (!state.review && held && held.status === 'running'
+      && !confirm('A review of this paragraph is still running.\n\nAccept your text now and discard it?')) {
+    return;
+  }
+
+  setBusy(true); setStatus('Writing', true);
   try {
     const result = await post('/api/accept', {
-      file: state.file, key: state.key, text, source,
+      file, key, text, source,
       verdict: state.review ? state.review.verdict : null,
     });
+    delete state.drafts[`${file}::${key}`];
+    delete state.reviews[`${file}::${key}`];
     const commit = result.commit;
     if (commit && commit.skipped) {
       setStatus('Written, not committed — see the notice');
@@ -968,7 +1102,6 @@ function settings() {
 $('btn-review').onclick = doReview;
 $('btn-accept').onclick = () => accept('mine');
 $('btn-accept-corrected').onclick = () => accept('corrected');
-$('btn-overwrite').onclick = () => accept('overwrite');
 $('btn-skip').onclick = skip;
 $('btn-reopen').onclick = reopen;
 $('btn-prev').onclick = () => step(-1);
@@ -997,11 +1130,23 @@ $('btn-copy').onclick = () => {
   $('rewrite').value = state.current.text;
   updateCounts(); $('rewrite').focus();
 };
-$('rewrite').oninput = () => { if (state.review) renderReview(null); updateCounts(); };
+$('rewrite').oninput = () => {
+  saveDraft();
+  // Editing invalidates a finished review, but must not throw away one that is
+  // still running: it belongs to the text that was sent, and still reports on it.
+  const held = state.key ? reviewFor(state.key) : null;
+  if (state.review && !(held && held.status === 'running')) {
+    if (held && held.status === 'done') delete state.reviews[draftKey(state.key)];
+    renderReview(null);
+  }
+  updateCounts();
+  renderParagraphs();
+};
 $('hide-done').onchange = renderParagraphs;
 
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && !$('modes-backdrop').hidden) { showModes(false); return; }
+  if (event.key === 'Escape' && !$('setup').hidden && state.configured) { showSetup(false); return; }
   const ctrl = event.ctrlKey || event.metaKey;
   if (ctrl && event.key === 'Enter') { event.preventDefault(); if (!$('btn-review').disabled) doReview(); }
   else if (ctrl && event.shiftKey && event.key.toLowerCase() === 's') {
@@ -1027,9 +1172,8 @@ $('browse-path').onkeydown = event => {
   if (event.key === 'Enter') browseTo($('browse-path').value.trim());
 };
 $('browse-use').onclick = () => choose(setupState.browsePath);
-$('where').onclick = () => showSetup(true);
-$('where').style.cursor = 'pointer';
-$('where').title = 'Click to open a different manuscript';
+$('btn-open').onclick = () => showSetup(true);
+$('setup-cancel').onclick = () => showSetup(false);
 
 async function start() {
   const data = await api('/api/overview');

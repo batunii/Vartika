@@ -75,14 +75,30 @@ the work rather than the executable. That folder ignores itself in git.
 
 | Action | Effect |
 |---|---|
-| **Review** (`Ctrl ⏎`) | Send both versions to the reviewer. Nothing is written. |
-| **Accept mine** (`Ctrl S`) | Write your text. Disabled on a `fail` verdict. |
+| **Accept as written** (`Ctrl S`) | Write your text. No review needed. |
+| **Review** (`Ctrl ⏎`) | Check it first. Runs in the background. |
 | **Accept corrected** (`Ctrl ⇧ S`) | Write the reviewer's corrected variant instead. |
-| **Overwrite anyway** | Write your text regardless, after confirming what you are dropping. |
 | **Skip** | Leave it and move on. |
 | **Reopen** | Put a done or skipped paragraph back in the queue. |
 | **Copy original** (`Ctrl K`) | Load the original into the editor as a starting point. |
 | `Alt ←` / `Alt →` | Previous / next paragraph. |
+
+**Reviewing is optional.** When you are happy with a paragraph, accept it and
+move on — nothing is checked and nothing is changed. The reviewer only ever
+interrupts you if you asked for a review and it came back `fail`, and even then
+only to say what it thinks is being lost before you confirm.
+
+**Reviews do not block you.** A review takes 10 to 30 seconds, so it runs in the
+background. Start one, move to the next paragraph, and keep writing; the answer
+lands against the paragraph it belongs to and waits there. The sidebar shows
+which paragraphs have a review running (`◐`), one waiting to be read (`✓ pass`,
+`✓ warn`, `✓ fail`, highlighted), and which have text you have typed but not yet
+accepted (`✎`). Your drafts are held per paragraph, so moving away never loses
+what you wrote.
+
+Reviews are queued one at a time on the server. Several can be in flight from
+your side, but they run in order, because the session modes resume a single
+conversation and two overlapping resumes would interleave turns in it.
 
 The queue holds prose only. Everything inside `figure`, `table`, `longtable`,
 `itemize`, `enumerate`, `equation`, `lstlisting` or `verbatim` is hidden, along
