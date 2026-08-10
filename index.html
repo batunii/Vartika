@@ -938,15 +938,7 @@ async function accept(source) {
     });
     delete state.drafts[`${file}::${key}`];
     delete state.reviews[`${file}::${key}`];
-    const commit = result.commit;
-    if (commit && commit.skipped) {
-      setStatus('Written, not committed — see the notice');
-      alert(commit.detail);
-    } else {
-      setStatus(commit
-        ? (commit.ok ? `Committed ${commit.sha}` : `Written, but git said: ${commit.detail}`)
-        : 'Written');
-    }
+    setStatus(`Written (${result.words_before} → ${result.words_after} words)`);
     renderOverview(result.overview);
     await advance();
     refreshTexcount();          // deliberately not awaited, it takes a second

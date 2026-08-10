@@ -4,7 +4,7 @@ Left column shows a paragraph from the manuscript, right column takes the
 author's replacement. A headless Claude Code session checks the replacement for
 lost meaning, grammar, LaTeX validity and machine-written phrasing, and offers a
 corrected variant. The author chooses what is written, and every accepted
-paragraph becomes its own git commit.
+paragraph is written straight into the .tex.
 
 Run:  python app.py            (then open http://127.0.0.1:8000)
 """
@@ -46,25 +46,17 @@ def bundle_dir() -> Path:
 APP_DIR = bundle_dir()
 
 
-def git_root_for(folder: Path) -> Path:
-    """The enclosing git repository, or the folder itself if there is none."""
-    for candidate in [folder, *folder.parents]:
-        if (candidate / ".git").exists():
-            return candidate
-    return folder
-
-
 # Defaults for running the server directly. The launcher calls configure() with
 # a manuscript it has resolved; these only matter for `python app.py`, which
 # works on the current directory unless told otherwise.
 MANUSCRIPT = Path(os.environ.get("REWRITE_MANUSCRIPT") or Path.cwd()).resolve()
-REPO_ROOT = Path(os.environ.get("REWRITE_REPO") or git_root_for(MANUSCRIPT)).resolve()
 DATA_DIR = Path(
     os.environ.get("REWRITE_DATA") or MANUSCRIPT.parent / ".rewrite-progress"
 ).resolve()
 
 STATE_PATH = DATA_DIR / "state.json"
 AUDIT_PATH = DATA_DIR / "audit.jsonl"
+ORIGINALS_DIR = DATA_DIR / "originals"
 
 # Filled by discover_files() on first use: [(relpath, display title), ...]
 FILE_ORDER: list[tuple[str, str]] = []
@@ -76,13 +68,12 @@ CONFIGURED = False
 
 # Set by the launcher. Every API call must present it, so that a page on some
 # other site cannot drive this server just because it guessed the port. The app
-# writes files and makes commits, so an open endpoint is not acceptable.
+# writes to the manuscript, so an open endpoint is not acceptable.
 ACCESS_TOKEN: str = ""
 
 
 def configure(
     manuscript: Path,
-    repo_root: Path,
     data_dir: Path,
     root_tex: Path | None = None,
 ) -> None:
@@ -92,19 +83,20 @@ def configure(
     choice, so a manuscript with several candidate roots is only asked about
     once.
     """
-    global MANUSCRIPT, REPO_ROOT, DATA_DIR, STATE_PATH, AUDIT_PATH
+    global MANUSCRIPT, DATA_DIR, STATE_PATH, AUDIT_PATH, ORIGINALS_DIR
     global FILE_ORDER, ROOT_TEX, CONFIGURED
     MANUSCRIPT = manuscript.resolve()
-    REPO_ROOT = repo_root.resolve()
     DATA_DIR = data_dir.resolve()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     # Progress belongs to the author, not the repository. Ignoring the whole
-    # directory (itself included) keeps `git status` clean wherever this runs.
+    # directory (itself included) keeps it out of any version control the
+    # author happens to be using.
     ignore = DATA_DIR / ".gitignore"
     if not ignore.exists():
         ignore.write_text("*\n", encoding="utf-8")
     STATE_PATH = DATA_DIR / "state.json"
     AUDIT_PATH = DATA_DIR / "audit.jsonl"
+    ORIGINALS_DIR = DATA_DIR / "originals"
 
     state = load_state()
     if root_tex is None:
@@ -278,7 +270,6 @@ AVAILABLE_MODELS = [
 DEFAULT_SETTINGS = {
     "word_limit": 30000,
     "model": "sonnet",
-    "auto_commit": True,
     # None detects the file's own wrap column, 0 disables re-wrapping.
     "wrap_width": None,
     # "auto" uses a conventionally named style file beside the manuscript if one
@@ -418,6 +409,15 @@ def audit(entry: dict) -> None:
 STYLE_NAMES = ("STYLE.md", "style.md", "STYLE-GUIDE.md", "style-guide.md", "WRITING.md")
 
 
+def project_roots() -> list[Path]:
+    """Folders that might hold project-level writing rules.
+
+    The manuscript and a few levels above it. Nothing here needs version
+    control to be present.
+    """
+    return [MANUSCRIPT, *list(MANUSCRIPT.parents)[:3]]
+
+
 def available_styles() -> list[str]:
     """Markdown files that could serve as a style guide, likeliest first.
 
@@ -429,8 +429,7 @@ def available_styles() -> list[str]:
     globs = (
         (MANUSCRIPT, "*.md"),
         (MANUSCRIPT.parent, "*.md"),
-        (REPO_ROOT / ".claude" / "skills", "*/SKILL.md"),
-        (REPO_ROOT, "STYLE.md"),
+        *[(p / ".claude" / "skills", "*/SKILL.md") for p in project_roots()],
     )
     for folder, pattern in globs:
         try:
@@ -564,47 +563,23 @@ def find_block(relpath: str, key: str) -> tuple[str, texparse.Block]:
     raise HTTPException(404, f"Paragraph {key} was not found in {relpath}")
 
 
-def git_path(relpath: str) -> str:
-    return str((MANUSCRIPT / relpath).relative_to(REPO_ROOT)).replace("\\", "/")
+def keep_original(relpath: str, source: str) -> None:
+    """Keep one untouched copy of a file, before this app first changes it.
 
-
-def has_uncommitted_changes(relpath: str) -> bool:
-    """Whether the file already differs from HEAD, before the app touches it.
-
-    This matters because `git commit -- <path>` commits the file's entire
-    working-tree state, not just the paragraph the app replaced. Committing a
-    file that already carried the author's own unrelated edits would bury them
-    inside a "rewrite:" commit.
+    Made once per file and never overwritten, so it always holds the text as it
+    was before any paragraph was replaced. Paired with audit.jsonl — which
+    records every original and its replacement — that is enough to undo
+    anything, without assuming the manuscript is in version control.
     """
+    target = ORIGINALS_DIR / relpath.replace("\\", "/")
+    if target.exists():
+        return
     try:
-        completed = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--", git_path(relpath)],
-            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return True          # cannot tell, so assume the worst and do not commit
-    return completed.returncode != 0
-
-
-def git_commit(relpath: str, message: str) -> dict:
-    """Commit just this file. Other modified files in the tree are left alone."""
-    target = git_path(relpath)
-    try:
-        completed = subprocess.run(
-            ["git", "commit", "-m", message, "--", target],
-            cwd=str(REPO_ROOT), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=60,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "detail": str(exc)}
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
-        return {"ok": False, "detail": detail[:400]}
-    sha = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"], cwd=str(REPO_ROOT),
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    ).stdout.strip()
-    return {"ok": True, "sha": sha}
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(source)
+    except OSError:
+        pass          # a missing backup must not stop the author working
 
 
 # --------------------------------------------------------------------------
@@ -697,7 +672,6 @@ class KeyRequest(BaseModel):
 class SettingsRequest(BaseModel):
     word_limit: int | None = None
     model: str | None = None
-    auto_commit: bool | None = None
     style_guide: str | None = None
     review_mode: str | None = None
     hybrid_turns: int | None = None
@@ -710,7 +684,7 @@ async def require_token(request, call_next):
 
     The token arrives once as a query parameter on the page URL and is stored
     in a cookie. Without this, any page in the browser could post to this
-    server, and this server writes files and makes commits.
+    server, and this server writes to the manuscript.
     """
     path = request.url.path
     if ACCESS_TOKEN and path.startswith("/api/"):
@@ -850,7 +824,6 @@ def api_choose(request: SetupRequest) -> dict:
 
     configure(
         manuscript=folder,
-        repo_root=git_root_for(folder),
         data_dir=folder.parent / ".rewrite-progress",
         root_tex=Path(request.root_tex) if request.root_tex else None,
     )
@@ -919,7 +892,7 @@ def api_review(request: ReviewRequest) -> dict:
                 relpath=request.file,
                 style_guide=style_guide_text(),
                 model=settings["model"],
-                cwd=REPO_ROOT,
+                cwd=MANUSCRIPT,
                 session=session,
             )
     except ReviewError as exc:
@@ -953,12 +926,9 @@ def api_accept(request: AcceptRequest) -> dict:
         source, block = find_block(request.file, request.key)
         path = resolve(request.file)
 
-        # Checked before the write, so it reflects the author's own edits rather
-        # than the app's.
-        dirty_before = (
-            has_uncommitted_changes(request.file)
-            if state["settings"]["auto_commit"] else False
-        )
+        # Taken before the first change to this file, so it holds the text as
+        # the author last left it.
+        keep_original(request.file, source)
 
         # Match the file's own hard-wrap column so the source stays consistent
         # and the diff shows only the words that changed.
@@ -987,36 +957,12 @@ def api_accept(request: AcceptRequest) -> dict:
         }
         save_state(state)
 
-        commit = None
-        if state["settings"]["auto_commit"]:
-            if dirty_before:
-                # Committing now would fold the author's own unrelated edits into
-                # a "rewrite:" commit. The paragraph is written either way; only
-                # the commit is withheld.
-                commit = {
-                    "ok": False,
-                    "skipped": True,
-                    "detail": (
-                        f"Not committed. {request.file} already had uncommitted changes "
-                        f"of your own, and committing would have swept them in. "
-                        f"Your paragraph is written. Commit or stash that file, and "
-                        f"later paragraphs in it will commit cleanly."
-                    ),
-                }
-            else:
-                label = f"{request.file} P{block.index + 1}"
-                commit = git_commit(
-                    request.file,
-                    f"rewrite: {label} ({before_words} to {after_words} words, {request.source})",
-                )
-
         audit({"event": "accept", "file": request.file, "key": request.key,
                "source": request.source, "verdict": request.verdict,
                "original": block.text, "final": text,
-               "words_before": before_words, "words_after": after_words,
-               "commit": commit})
+               "words_before": before_words, "words_after": after_words})
 
-        return {"ok": True, "commit": commit, "words_before": before_words,
+        return {"ok": True, "words_before": before_words,
                 "words_after": after_words, "overview": overview(state)}
 
 
@@ -1122,7 +1068,6 @@ if __name__ == "__main__":
     import uvicorn
 
     print(f"Manuscript : {MANUSCRIPT}")
-    print(f"Repository : {REPO_ROOT}")
     style = style_guide_path()
     print(f"Style guide: {style if style else 'none (writing rules are optional)'}")
     uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")

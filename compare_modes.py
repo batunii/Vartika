@@ -170,7 +170,7 @@ def main() -> int:
           f"hybrid re-primes every {args.hybrid_turns} turns, "
           f"style guide: {args.style or 'none'}", flush=True)
 
-    cwd = app.git_root_for(manuscript)
+    cwd = manuscript
     results = {mode: run_mode(mode, cases, style_guide, args.hybrid_turns, cwd)
                for mode in modes}
     Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")

@@ -213,26 +213,28 @@ per-call floor drops from $0.090 to $0.001.
 
 ## Safety
 
-If the manuscript is in a git repository, each accepted paragraph becomes its
-own commit, so any single change can be reverted alone:
+Vartika edits your `.tex` files in place. Two things make that recoverable.
 
-```sh
-git log --oneline --grep '^rewrite:'
-git revert <sha>
-```
+**An untouched copy of every file it changes.** The first time a file is
+modified, it is copied to `.rewrite-progress/originals/` exactly as it was, and
+never overwritten after that. However many paragraphs you go on to replace, that
+copy is still the version from before Vartika touched anything.
 
-Commits use an explicit pathspec, so only the file you edited is committed and
-other modified files are left alone. **If that file already had uncommitted
-changes of your own, the paragraph is written but not committed**, because
-committing would sweep your unrelated edits into a "rewrite:" commit. Commit or
-stash them and later paragraphs commit cleanly.
+**A full log of every change.** `audit.jsonl` records each review, accept, skip
+and reopen, including the complete original and replacement text of every
+paragraph. Any single paragraph can be put back by hand from it.
 
-Outside a repository, auto-commit turns itself off.
+Both live in `.rewrite-progress/` beside your manuscript, which ignores itself in
+git so it never appears in your history.
 
-`audit.jsonl` records every review, accept, skip and reopen, including the full
-original and replacement text. Paragraphs are identified by a hash of their own
-text, so progress survives edits elsewhere in the file. Line endings are
-preserved byte for byte.
+Vartika does not touch version control. If you keep your manuscript in git —
+which is worth doing — commit before you start, and commit the results as you
+like. Deciding what your history looks like is your business, not this tool's.
+
+Paragraphs are identified by a hash of their own text, so progress survives
+edits made elsewhere in the file. Line endings are preserved byte for byte, and
+accepted text is re-flowed to the column the file already uses, so a diff shows
+only the words that changed.
 
 ## Files
 

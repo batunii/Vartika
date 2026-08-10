@@ -151,23 +151,16 @@ def main() -> None:
 
     manuscript = obvious_manuscript(force_pick)
     if manuscript is not None:
-        repo = app.git_root_for(manuscript)
-        app.configure(manuscript=manuscript, repo_root=repo,
+        app.configure(manuscript=manuscript,
                       data_dir=manuscript.parent / ".rewrite-progress")
         remember(manuscript)
-
-        committing = (repo / ".git").exists()
-        if not committing:
-            state = app.load_state()
-            state["settings"]["auto_commit"] = False
-            app.save_state(state)
 
         paragraphs = sum(len(app.read_blocks(rel)[1])
                          for rel, _ in app.file_order() if (manuscript / rel).exists())
         log(f"  Manuscript : {manuscript}")
         log(f"  Main file  : {app.ROOT_TEX.name if app.ROOT_TEX else '?'}")
         log(f"  Chapters   : {len(app.file_order())}   Paragraphs: {paragraphs}")
-        log(f"  Committing : {'one commit per paragraph' if committing else 'no (not a git repository)'}")
+        log(f"  Originals  : {app.ORIGINALS_DIR}")
     else:
         log("  No single obvious manuscript here.")
         log("  Choose one on the page that opens.")
