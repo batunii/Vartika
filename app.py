@@ -70,6 +70,15 @@ AUDIT_PATH = DATA_DIR / "audit.jsonl"
 FILE_ORDER: list[tuple[str, str]] = []
 ROOT_TEX: Path | None = None
 
+# False until a manuscript has been chosen. The frontend shows its setup page
+# rather than an empty queue while this is unset.
+CONFIGURED = False
+
+# Set by the launcher. Every API call must present it, so that a page on some
+# other site cannot drive this server just because it guessed the port. The app
+# writes files and makes commits, so an open endpoint is not acceptable.
+ACCESS_TOKEN: str = ""
+
 
 def configure(
     manuscript: Path,
@@ -84,7 +93,7 @@ def configure(
     once.
     """
     global MANUSCRIPT, REPO_ROOT, DATA_DIR, STATE_PATH, AUDIT_PATH
-    global FILE_ORDER, ROOT_TEX
+    global FILE_ORDER, ROOT_TEX, CONFIGURED
     MANUSCRIPT = manuscript.resolve()
     REPO_ROOT = repo_root.resolve()
     DATA_DIR = data_dir.resolve()
@@ -109,6 +118,8 @@ def configure(
 
     ROOT_TEX = find_root_tex(MANUSCRIPT, root_tex)
     FILE_ORDER = discover_files(MANUSCRIPT, ROOT_TEX)
+    REVIEW_SESSION.reset()
+    CONFIGURED = True
 
 
 # --------------------------------------------------------------------------
@@ -615,10 +626,17 @@ def file_summary(state: dict, relpath: str, title: str) -> dict:
 
 
 def overview(state: dict) -> dict:
+    if not CONFIGURED:
+        return {"configured": False, "files": [], "settings": state["settings"],
+                "models": AVAILABLE_MODELS, "review_modes": REVIEW_MODES,
+                "usage": state["usage"], "usage_by_model": state["usage_by_model"],
+                "totals": {"prose_words": 0, "document_words": 0, "paragraphs": 0,
+                           "done": 0, "skipped": 0, "pending": 0}}
     files = [file_summary(state, rel, title) for rel, title in file_order()]
     present = [f for f in files if not f["missing"]]
     candidates = find_root_candidates(MANUSCRIPT)
     return {
+        "configured": True,
         "files": files,
         "settings": state["settings"],
         "models": AVAILABLE_MODELS,
@@ -680,9 +698,159 @@ class SettingsRequest(BaseModel):
     session_turns: int | None = None
 
 
+@app.middleware("http")
+async def require_token(request, call_next):
+    """Reject API calls that do not carry the launcher's token.
+
+    The token arrives once as a query parameter on the page URL and is stored
+    in a cookie. Without this, any page in the browser could post to this
+    server, and this server writes files and makes commits.
+    """
+    path = request.url.path
+    if ACCESS_TOKEN and path.startswith("/api/"):
+        supplied = request.cookies.get("rewrite_token") or request.headers.get("x-rewrite-token")
+        if supplied != ACCESS_TOKEN:
+            return JSONResponse({"error": "This page is out of date. Reopen the "
+                                          "link printed in the console."}, status_code=403)
+    return await call_next(request)
+
+
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(APP_DIR / "index.html")
+def index(token: str = "") -> FileResponse:
+    response = FileResponse(APP_DIR / "index.html")
+    if ACCESS_TOKEN and token == ACCESS_TOKEN:
+        response.set_cookie("rewrite_token", ACCESS_TOKEN, httponly=True, samesite="strict")
+    return response
+
+
+# --------------------------------------------------------------------------
+# Choosing a manuscript, from inside the app
+# --------------------------------------------------------------------------
+
+def describe_folder(folder: Path) -> dict:
+    """Enough about a folder for someone to recognise their own work."""
+    try:
+        tex = [p for p in folder.rglob("*.tex")
+               if not any(part.startswith(".") for part in p.relative_to(folder).parts)]
+    except OSError:
+        tex = []
+    newest = max((p.stat().st_mtime for p in tex), default=0.0)
+    roots = find_root_candidates(folder, max_depth=1)
+    return {
+        "path": str(folder),
+        "name": folder.name or str(folder),
+        "tex_count": len(tex),
+        "modified": datetime.fromtimestamp(newest, tz=timezone.utc).isoformat() if newest else None,
+        "roots": [p.name for p in roots],
+        "is_manuscript": bool(roots),
+    }
+
+
+def nearby_manuscripts(start: Path) -> list[dict]:
+    """Manuscript folders at or just below the given directory, newest first."""
+    found: list[Path] = []
+    for base in (start, *list(start.parents)[:3]):
+        candidates = [base]
+        try:
+            candidates += [p for p in base.iterdir()
+                           if p.is_dir() and not p.name.startswith((".", "__"))]
+        except OSError:
+            continue
+        for folder in candidates:
+            if folder not in found and find_root_candidates(folder, max_depth=1):
+                found.append(folder)
+    described = [describe_folder(f) for f in found]
+    described.sort(key=lambda d: d["modified"] or "", reverse=True)
+    return described[:30]
+
+
+@app.get("/api/setup")
+def api_setup() -> dict:
+    start = Path(os.environ.get("REWRITE_START") or Path.cwd())
+    return {
+        "configured": CONFIGURED,
+        "manuscript": str(MANUSCRIPT) if CONFIGURED else None,
+        "suggestions": nearby_manuscripts(start),
+        "start": str(start),
+        "home": str(Path.home()),
+    }
+
+
+@app.get("/api/browse")
+def api_browse(path: str = "") -> dict:
+    """List sub-folders, so a manuscript can be found without typing a path."""
+    folder = Path(path).expanduser() if path else Path.home()
+    try:
+        folder = folder.resolve()
+        if not folder.is_dir():
+            raise HTTPException(400, f"{folder} is not a folder")
+        entries = sorted(
+            (p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")),
+            key=lambda p: p.name.lower(),
+        )
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(400, f"Cannot open {folder}: {exc}") from exc
+
+    return {
+        "path": str(folder),
+        "parent": str(folder.parent) if folder.parent != folder else None,
+        "self": describe_folder(folder),
+        "folders": [
+            {"name": p.name, "path": str(p),
+             "is_manuscript": bool(find_root_candidates(p, max_depth=1))}
+            for p in entries[:400]
+        ],
+    }
+
+
+class SetupRequest(BaseModel):
+    path: str
+    root_tex: str | None = None
+
+
+@app.post("/api/setup")
+def api_choose(request: SetupRequest) -> dict:
+    folder = Path(request.path).expanduser()
+    try:
+        folder = folder.resolve()
+    except OSError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not folder.is_dir():
+        raise HTTPException(400, f"{folder} is not a folder.")
+
+    roots = find_root_candidates(folder, max_depth=1)
+    if not roots:
+        raise HTTPException(
+            400,
+            f"No .tex file in {folder.name} contains \\documentclass, so this is "
+            f"not a manuscript folder. Pick the folder holding the main document.",
+        )
+
+    # More than one main document is a real choice, so ask rather than guess.
+    if len(roots) > 1 and not request.root_tex:
+        return {
+            "needs_root": True,
+            "path": str(folder),
+            "roots": [
+                {"name": p.name,
+                 "rel": p.relative_to(folder).as_posix(),
+                 "includes": len(_INCLUDE_RE.findall(
+                     p.read_text(encoding="utf-8", errors="replace")))}
+                for p in roots
+            ],
+        }
+
+    configure(
+        manuscript=folder,
+        repo_root=git_root_for(folder),
+        data_dir=folder.parent / ".rewrite-progress",
+        root_tex=Path(request.root_tex) if request.root_tex else None,
+    )
+    return {"ok": True, "configured": True, "manuscript": str(MANUSCRIPT),
+            "root_tex": ROOT_TEX.name if ROOT_TEX else None,
+            "files": len(file_order())}
 
 
 @app.get("/api/overview")

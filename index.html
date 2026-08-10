@@ -160,6 +160,54 @@
   }
   .hint { color: var(--muted); padding: 14px; font-size: 13px; }
 
+  /* ---- setup page ---- */
+  #setup { position: fixed; inset: 0; background: var(--bg); overflow-y: auto; z-index: 40; }
+  #setup[hidden] { display: none; }
+  .setup-inner { max-width: 780px; margin: 0 auto; padding: 46px 24px 60px; }
+  .setup-inner h1 { font-size: 22px; margin: 0 0 8px; font-weight: 600; }
+  .setup-lead { color: var(--muted); margin: 0 0 26px; font-size: 13.5px; max-width: 64ch; }
+  .setup-inner code { font: 12.5px var(--mono); background: var(--panel-2); padding: 1px 5px; border-radius: 4px; }
+  .cand {
+    display: flex; align-items: center; gap: 14px; width: 100%; text-align: left;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 13px 15px; margin-bottom: 9px; cursor: pointer;
+  }
+  .cand:hover { border-color: var(--accent); background: var(--panel-2); }
+  .cand-main { min-width: 0; flex: 1; }
+  .cand-main b { display: block; font-size: 14px; font-weight: 600; }
+  .cand-main small { display: block; color: var(--muted); font: 11.5px/1.5 var(--mono);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cand-meta { text-align: right; font: 11.5px/1.6 var(--mono); color: var(--muted); white-space: nowrap; }
+  .setup-none { color: var(--muted); font-size: 13px; padding: 10px 0 18px; }
+  #setup-browse-wrap { margin-top: 18px; }
+  #setup-browse-wrap summary { cursor: pointer; color: var(--accent); font-size: 13px; padding: 6px 0; }
+  .browse { border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; background: var(--panel); }
+  .browse-bar { display: flex; gap: 7px; padding: 10px; border-bottom: 1px solid var(--line); }
+  .browse-bar input {
+    flex: 1; font: 12.5px var(--mono); padding: 7px 9px; background: var(--bg);
+    color: var(--text); border: 1px solid var(--line); border-radius: 5px;
+  }
+  #browse-list { max-height: 300px; overflow-y: auto; }
+  .browse-row {
+    display: flex; align-items: center; gap: 9px; padding: 7px 12px;
+    cursor: pointer; font-size: 13px; border-bottom: 1px solid #23272f;
+  }
+  .browse-row:hover { background: var(--panel-2); }
+  .browse-row .tag {
+    margin-left: auto; font: 10px/1 var(--mono); color: var(--pass);
+    border: 1px solid #2f7a55; border-radius: 4px; padding: 3px 5px;
+  }
+  .browse-foot {
+    display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+    border-top: 1px solid var(--line);
+  }
+  .browse-foot .muted { font: 11.5px var(--mono); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+  .setup-error {
+    margin-top: 18px; padding: 11px 14px; border-radius: 7px;
+    background: #4d2725; color: #f0c4c1; font-size: 13px;
+  }
+
   /* ---- mode sheet ---- */
   .backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,.55);
@@ -245,6 +293,37 @@
     <button id="btn-settings" title="Word limit">Limit</button>
   </div>
 </header>
+
+<div id="setup" hidden>
+  <div class="setup-inner">
+    <h1>Which manuscript?</h1>
+    <p class="setup-lead">
+      Choose the folder holding your LaTeX files — the one containing the main
+      document, the <code>.tex</code> with <code>\documentclass</code> in it.
+      Nothing leaves your machine.
+    </p>
+
+    <div id="setup-suggestions"></div>
+
+    <details id="setup-browse-wrap">
+      <summary>Somewhere else on this computer</summary>
+      <div class="browse">
+        <div class="browse-bar">
+          <button id="browse-up" title="Up one level">↑</button>
+          <input id="browse-path" spellcheck="false" placeholder="Type or paste a folder path">
+          <button id="browse-go">Go</button>
+        </div>
+        <div id="browse-list"></div>
+        <div class="browse-foot">
+          <span id="browse-here" class="muted"></span>
+          <button id="browse-use" class="primary" disabled>Use this folder</button>
+        </div>
+      </div>
+    </details>
+
+    <div id="setup-error" class="setup-error" hidden></div>
+  </div>
+</div>
 
 <div id="modes-backdrop" class="backdrop" hidden>
   <div class="sheet" role="dialog" aria-label="Review mode">
@@ -339,6 +418,113 @@ async function api(path, options) {
   const data = await response.json().catch(() => ({ error: response.statusText }));
   if (!response.ok) throw new Error(data.error || response.statusText);
   return data;
+}
+
+// ---------- setup: choosing a manuscript ----------
+
+const setupState = { browsePath: null, browseIsManuscript: false };
+
+function showSetup(show) {
+  $('setup').hidden = !show;
+  if (show) loadSetup();
+}
+
+function relTime(iso) {
+  if (!iso) return 'no .tex found';
+  const days = (Date.now() - new Date(iso).getTime()) / 86400000;
+  if (days < 1) return 'edited today';
+  if (days < 2) return 'edited yesterday';
+  if (days < 60) return `edited ${Math.round(days)} days ago`;
+  return `edited ${new Date(iso).toLocaleDateString()}`;
+}
+
+async function loadSetup() {
+  const data = await api('/api/setup');
+  const list = data.suggestions || [];
+  $('setup-suggestions').innerHTML = list.length
+    ? list.map(c => `
+        <button class="cand" data-path="${escapeAttr(c.path)}">
+          <div class="cand-main">
+            <b>${escapeHtml(c.name)}</b>
+            <small>${escapeHtml(c.path)}</small>
+          </div>
+          <div class="cand-meta">
+            ${c.tex_count} .tex<br>${escapeHtml(relTime(c.modified))}
+          </div>
+        </button>`).join('')
+    : `<div class="setup-none">
+         No LaTeX manuscript found near ${escapeHtml(data.start)}.
+         Use the option below to point at one.
+       </div>`;
+  document.querySelectorAll('.cand[data-path]').forEach(node => {
+    node.onclick = () => choose(node.dataset.path);
+  });
+  if (!list.length) $('setup-browse-wrap').open = true;
+  if (!setupState.browsePath) browseTo(data.start || data.home);
+}
+
+async function browseTo(path) {
+  let data;
+  try {
+    data = await api('/api/browse?path=' + encodeURIComponent(path || ''));
+  } catch (error) {
+    $('browse-list').innerHTML =
+      `<div class="browse-row" style="color:var(--fail)">${escapeHtml(error.message)}</div>`;
+    return;
+  }
+  setupState.browsePath = data.path;
+  setupState.browseIsManuscript = data.self.is_manuscript;
+  $('browse-path').value = data.path;
+  $('browse-here').textContent = data.self.is_manuscript
+    ? `${data.path} — ${data.self.tex_count} .tex, main file ${data.self.roots.join(', ')}`
+    : `${data.path} — no main .tex directly in this folder`;
+  $('browse-use').disabled = !data.self.is_manuscript;
+  $('browse-up').disabled = !data.parent;
+  $('browse-list').innerHTML = data.folders.length
+    ? data.folders.map(f => `
+        <div class="browse-row" data-path="${escapeAttr(f.path)}">
+          <span>📁</span><span>${escapeHtml(f.name)}</span>
+          ${f.is_manuscript ? '<span class="tag">manuscript</span>' : ''}
+        </div>`).join('')
+    : '<div class="browse-row muted">No sub-folders here.</div>';
+  document.querySelectorAll('.browse-row[data-path]').forEach(node => {
+    node.onclick = () => browseTo(node.dataset.path);
+  });
+}
+
+async function choose(path, rootTex) {
+  $('setup-error').hidden = true;
+  try {
+    const result = await api('/api/setup', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, root_tex: rootTex || null }),
+    });
+    if (result.needs_root) return askRoot(result);
+    showSetup(false);
+    await start();
+    setStatus(`Opened ${result.manuscript}`);
+  } catch (error) {
+    $('setup-error').textContent = error.message;
+    $('setup-error').hidden = false;
+  }
+}
+
+function askRoot(result) {
+  $('setup-suggestions').innerHTML = `
+    <h2 style="font-size:15px;margin:0 0 6px">Which file is the main document?</h2>
+    <p class="setup-lead" style="margin-bottom:16px">
+      ${escapeHtml(result.path)} has more than one file with
+      <code>\\documentclass</code>. Chapter order is read from the one you pick.
+    </p>
+    ${result.roots.map(r => `
+      <button class="cand" data-root="${escapeAttr(r.rel)}">
+        <div class="cand-main"><b>${escapeHtml(r.name)}</b>
+          <small>${r.includes} included file${r.includes === 1 ? '' : 's'}</small></div>
+      </button>`).join('')}`;
+  $('setup-browse-wrap').open = false;
+  document.querySelectorAll('.cand[data-root]').forEach(node => {
+    node.onclick = () => choose(result.path, node.dataset.root);
+  });
 }
 const post = (path, body) => api(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -832,15 +1018,32 @@ window.addEventListener('beforeunload', event => {
   if ($('rewrite').value.trim() && !state.busy) { event.preventDefault(); event.returnValue = ''; }
 });
 
-(async function start() {
-  await refreshOverview();
+$('browse-up').onclick = () => {
+  api('/api/browse?path=' + encodeURIComponent(setupState.browsePath || ''))
+    .then(d => d.parent && browseTo(d.parent));
+};
+$('browse-go').onclick = () => browseTo($('browse-path').value.trim());
+$('browse-path').onkeydown = event => {
+  if (event.key === 'Enter') browseTo($('browse-path').value.trim());
+};
+$('browse-use').onclick = () => choose(setupState.browsePath);
+$('where').onclick = () => showSetup(true);
+$('where').style.cursor = 'pointer';
+$('where').title = 'Click to open a different manuscript';
+
+async function start() {
+  const data = await api('/api/overview');
+  if (!data.configured) { showSetup(true); return; }
+  renderOverview(data);
   const remembered = localStorage.getItem('rewrite:file');
   const first = state.files.find(f => f.file === remembered && !f.missing)
     || state.files.find(f => !f.missing && f.pending > 0)
     || state.files.find(f => !f.missing);
   if (first) await openFile(first.file);
   refreshTexcount();
-})();
+}
+
+start();
 </script>
 </body>
 </html>

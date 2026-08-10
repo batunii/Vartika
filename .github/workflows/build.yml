@@ -51,12 +51,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # tkinter ships with the python.org and Homebrew builds but not with the
-      # bare Ubuntu runner. Without it the folder chooser cannot open.
-      - name: Install tkinter (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y python3-tk
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

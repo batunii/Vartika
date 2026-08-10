@@ -30,8 +30,13 @@ server on a free port, and opens your browser. The console window it opens is
 the status display and the stop button.
 
 - **macOS**: unsigned, so the first run is blocked. Right-click, Open, confirm —
-  or `xattr -d com.apple.quarantine ./Vartika-macos-*` once.
+  or `xattr -d com.apple.quarantine ./Vartika-macos-*` once. Apple-silicon only;
+  Intel Macs need to run from source.
 - **Linux**: `chmod +x Vartika-linux` if the download drops the flag.
+
+The URL it opens carries a one-time token, and the server refuses API calls
+without it. Open the link from the console rather than typing the address, or
+the page will not be able to talk to the server.
 
 From source instead:
 
@@ -46,11 +51,15 @@ python build.py               # build the standalone binary (needs pyinstaller)
 
 A manuscript folder is one containing a `.tex` file with `\documentclass` in it.
 
-In order of preference: a single manuscript sitting beside the executable wins
-outright, then the folder you chose last time, then a single folder found
-nearby. **If several are found it asks**, listing each with its file count and
-last-edited date, newest first. It will not guess between a working copy, a
-snapshot and a template. Run with `--pick` to choose again.
+**Choosing one happens in the app**, on a first page that lists every manuscript
+it found near the binary with its file count and when it was last edited, plus a
+folder browser for anything else. Folders that are manuscripts are marked as
+such while you browse, so you are never guessing.
+
+It only skips that page when the answer is unambiguous: a single manuscript
+sitting beside the executable, or one you named explicitly. It will not choose
+between a working copy, a snapshot and a template. Click the manuscript name in
+the header to switch at any time, or start with `--pick`.
 
 Chapter order is read from the `\include` lines of the main `.tex`, and chapter
 names from each file's `\chapter{...}`. If a folder holds several files with
