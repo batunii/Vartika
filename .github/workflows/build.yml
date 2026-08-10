@@ -110,14 +110,22 @@ jobs:
         run: |
           set -e
           npm install jsdom --silent --no-fund --no-audit
-          REWRITE_PORT=8123 REWRITE_MANUSCRIPT="$PWD/sample" python launcher.py > server.log 2>&1 &
+          # Started directly rather than through launcher.py, which requires the
+          # Claude Code CLI to be installed and logged in. The page check only
+          # needs the server; reviewing is not exercised here.
+          python - > server.log 2>&1 <<'PYEOF' &
+          from pathlib import Path
+          import app, uvicorn
+          app.ACCESS_TOKEN = 'citoken'
+          app.configure(manuscript=Path('sample').resolve(), data_dir=Path('sample-data'))
+          uvicorn.run(app.app, host='127.0.0.1', port=8123, log_level='error')
+          PYEOF
           for i in $(seq 1 30); do
-            grep -q 'token=' server.log && break
+            curl -fsS -o /dev/null "http://127.0.0.1:8123/" && break
             sleep 1
           done
-          TOKEN=$(grep -o 'token=[A-Za-z0-9_-]*' server.log | head -1 | cut -d= -f2)
-          test -n "$TOKEN" || { echo "server never started:"; cat server.log; exit 1; }
-          node check_page.js "$TOKEN" http://127.0.0.1:8123
+          curl -fsS -o /dev/null "http://127.0.0.1:8123/" || { echo "server never started:"; cat server.log; exit 1; }
+          node check_page.js citoken http://127.0.0.1:8123
 
       - name: Mark executable (macOS, Linux)
         if: runner.os != 'Windows'
