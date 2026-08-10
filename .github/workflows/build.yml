@@ -100,6 +100,25 @@ jobs:
           print('parsed', len(files), 'files,', len(blocks), 'paragraph(s); accept and revert round-trip clean')
           "
 
+      # Loads the page in jsdom, runs its JavaScript and asserts the controls
+      # actually rendered. A control emptied by an unrelated render leaves the
+      # page looking fine, so neither reading the source nor testing the API
+      # catches it. This has caught two such bugs already.
+      - name: Check the page renders
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -e
+          npm install jsdom --silent --no-fund --no-audit
+          REWRITE_PORT=8123 REWRITE_MANUSCRIPT="$PWD/sample" python launcher.py > server.log 2>&1 &
+          for i in $(seq 1 30); do
+            grep -q 'token=' server.log && break
+            sleep 1
+          done
+          TOKEN=$(grep -o 'token=[A-Za-z0-9_-]*' server.log | head -1 | cut -d= -f2)
+          test -n "$TOKEN" || { echo "server never started:"; cat server.log; exit 1; }
+          node check_page.js "$TOKEN" http://127.0.0.1:8123
+
       - name: Mark executable (macOS, Linux)
         if: runner.os != 'Windows'
         run: chmod +x ${{ matrix.binary }}

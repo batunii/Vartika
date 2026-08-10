@@ -32,11 +32,23 @@ def main() -> int:
             print("PyInstaller is not installed. Run:  pip install pyinstaller")
             return 1
 
+    # Regenerate the icon so it can never drift from make_icon.py.
+    icon = HERE / "icon.ico"
+    try:
+        import make_icon
+        make_icon.main()
+    except Exception as exc:                     # Pillow missing, say
+        print(f"Could not draw the icon ({exc}); building without one.")
+
     separator = ";" if sys.platform == "win32" else ":"
     command = [
         sys.executable, "-m", "PyInstaller",
         "--onefile",
         "--name", NAME,
+        # Windows embeds this in the exe. macOS wants an .icns in an .app
+        # bundle and a bare Linux binary carries no icon at all, so both are
+        # built without one.
+        *(["--icon", str(icon)] if icon.exists() and sys.platform == "win32" else []),
         # A console window is the app's status display and its stop button.
         "--console",
         "--add-data", f"{HERE / 'index.html'}{separator}.",

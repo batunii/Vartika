@@ -137,11 +137,14 @@ By default **no style guide is sent**. The reviewer still checks meaning,
 grammar, LaTeX and machine-sounding phrasing — those are built in, and the
 spelling convention is inferred from your original rather than imposed.
 
-To have it enforce your own conventions, use the **Style** picker in the header.
-It lists Markdown files beside the manuscript, in its parent, and any project
-skill files. A file named `STYLE.md` beside the manuscript is picked up
-automatically. The file is read per request, so editing it changes the reviewer
-with no restart.
+To have it enforce your own conventions, click **Style** and choose a markdown
+file with your browser's own file dialog.
+
+The text is copied to `.rewrite-progress/style-guide.md`, because a browser will
+not tell an app where the file you picked lives — it hands over the contents
+only. That copy is read fresh on every review, so you can edit it there
+directly; editing your original will not carry across, so pick it again to
+update.
 
 Nothing is bundled: writing rules are one author's voice, and shipping a
 particular set would impose them on everyone.
@@ -258,6 +261,8 @@ only the words that changed.
 | `index.html` | The whole frontend |
 | `build.py` | Builds the standalone binary |
 | `compare_modes.py` | Reproduces the review-mode comparison |
+| `check_page.js` | Loads the page, runs its JavaScript, asserts the controls rendered |
+| `make_icon.py` | Draws the application icon |
 
 Point it at any manuscript with the `REWRITE_MANUSCRIPT`, `REWRITE_REPO` and
 `REWRITE_DATA` environment variables, or just pass the folder on the command
@@ -265,4 +270,8 @@ line to `compare_modes.py`.
 
 ## Name
 
-*Vartika* (वर्तिका) — a wick, or a brush.
+A *vārttika* (वार्त्तिक) is a note written against an existing rule — the form Kātyāyana used to annotate Pāṇini's grammar, examining each rule and
+saying what it missed or overstated.
+
+That is what this tool does to a manuscript: takes it a rule at a time, and
+says plainly what a rewrite lost.

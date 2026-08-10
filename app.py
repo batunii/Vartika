@@ -273,9 +273,8 @@ DEFAULT_SETTINGS = {
     "model": "sonnet",
     # None detects the file's own wrap column, 0 disables re-wrapping.
     "wrap_width": None,
-    # "auto" uses a conventionally named style file beside the manuscript if one
-    # exists, "none" sends no writing rules, or a path relative to the manuscript.
-    "style_guide": "auto",
+    # Path to a markdown file, or None for no writing rules at all.
+    "style_guide": None,
     # How the rules reach the reviewer. See REVIEW_MODES.
     "review_mode": "hybrid",
     "hybrid_turns": 4,
@@ -407,81 +406,20 @@ def audit(entry: dict) -> None:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-STYLE_NAMES = ("STYLE.md", "style.md", "STYLE-GUIDE.md", "style-guide.md", "WRITING.md")
+def style_guide_file() -> Path:
+    """Where the chosen writing rules are kept.
 
-
-def project_roots() -> list[Path]:
-    """Folders that might hold project-level writing rules.
-
-    The manuscript and a few levels above it. Nothing here needs version
-    control to be present.
+    A browser cannot tell the server where a picked file lives — it only hands
+    over the contents — so the text is stored here. It is a plain markdown file,
+    read fresh on every review, so it can also be edited in place.
     """
-    return [MANUSCRIPT, *list(MANUSCRIPT.parents)[:3]]
-
-
-def available_styles() -> list[str]:
-    """Markdown files that could serve as a style guide, likeliest first.
-
-    Offered in the picker so nobody has to type a path. Covers the manuscript
-    folder, its parent, and any project skill files, which is where a Claude
-    Code project keeps its writing conventions.
-    """
-    found: list[Path] = []
-    globs = (
-        (MANUSCRIPT, "*.md"),
-        (MANUSCRIPT.parent, "*.md"),
-        *[(p / ".claude" / "skills", "*/SKILL.md") for p in project_roots()],
-    )
-    for folder, pattern in globs:
-        try:
-            found.extend(sorted(folder.glob(pattern)))
-        except OSError:
-            continue
-
-    def rank(path: Path) -> tuple[int, str]:
-        name = path.name.lower()
-        stem = path.stem.lower()
-        if name in {n.lower() for n in STYLE_NAMES}:
-            return (0, name)
-        if "skill" in stem or "style" in stem or "writing" in stem:
-            return (1, name)
-        return (2, name)
-
-    ordered: list[str] = []
-    for path in sorted(found, key=rank):
-        rel = os.path.relpath(path, MANUSCRIPT).replace("\\", "/")
-        if rel not in ordered:
-            ordered.append(rel)
-    return ordered[:40]
-
-
-def style_guide_path() -> Path | None:
-    """The style guide in force, or None when the reviewer should get no rules.
-
-    Nothing is sent unless the author points at a file. A conventionally named
-    file beside the manuscript is offered as the default, but it is still
-    recorded as an explicit choice the first time it is used.
-    """
-    state = load_state()
-    setting = state["settings"].get("style_guide", "auto")
-
-    if setting in (None, "", "none"):
-        return None
-    if setting != "auto":
-        candidate = MANUSCRIPT / setting
-        return candidate if candidate.exists() else None
-
-    for name in STYLE_NAMES:
-        candidate = MANUSCRIPT / name
-        if candidate.exists():
-            return candidate
-    return None
+    return DATA_DIR / "style-guide.md"
 
 
 def style_guide_text() -> str:
-    """The writing conventions the reviewer enforces, or nothing at all."""
-    path = style_guide_path()
-    if path is None:
+    """The writing conventions in force, or nothing at all."""
+    path = style_guide_file()
+    if not load_state()["settings"].get("style_guide") or not path.is_file():
         return ""
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -626,11 +564,9 @@ def overview(state: dict) -> dict:
         "manuscript": str(MANUSCRIPT),
         "root_tex": ROOT_TEX.relative_to(MANUSCRIPT).as_posix() if ROOT_TEX else None,
         "root_choices": [p.relative_to(MANUSCRIPT).as_posix() for p in candidates],
-        "style": (
-            os.path.relpath(style_path, MANUSCRIPT).replace("\\", "/")
-            if (style_path := style_guide_path()) else None
-        ),
-        "style_choices": available_styles(),
+        "style": state["settings"].get("style_guide"),
+        "style_file": str(style_guide_file()),
+        "style_words": len(style_guide_text().split()),
         "usage": state["usage"],
         "usage_by_model": state["usage_by_model"],
         "totals": {
@@ -758,8 +694,12 @@ def api_setup() -> dict:
 
 
 @app.get("/api/browse")
-def api_browse(path: str = "") -> dict:
-    """List sub-folders, so a manuscript can be found without typing a path."""
+def api_browse(path: str = "", files: str = "") -> dict:
+    """List sub-folders, so a manuscript can be found without typing a path.
+
+    With `files` set to an extension, matching files are listed too — used to
+    pick a style guide without having to type its path.
+    """
     folder = Path(path).expanduser() if path else Path.home()
     try:
         folder = folder.resolve()
@@ -774,6 +714,19 @@ def api_browse(path: str = "") -> dict:
     except OSError as exc:
         raise HTTPException(400, f"Cannot open {folder}: {exc}") from exc
 
+    matching: list[dict] = []
+    if files:
+        suffix = files if files.startswith(".") else f".{files}"
+        try:
+            matching = [
+                {"name": p.name, "path": str(p), "size": p.stat().st_size}
+                for p in sorted(folder.iterdir())
+                if p.is_file() and p.suffix.lower() == suffix.lower()
+                and not p.name.startswith(".")
+            ][:400]
+        except OSError:
+            matching = []
+
     return {
         "path": str(folder),
         "parent": str(folder.parent) if folder.parent != folder else None,
@@ -783,7 +736,37 @@ def api_browse(path: str = "") -> dict:
              "is_manuscript": bool(find_root_candidates(p, max_depth=1))}
             for p in entries[:400]
         ],
+        "files": matching,
     }
+
+
+class StyleRequest(BaseModel):
+    name: str = ""
+    text: str = ""
+
+
+@app.post("/api/style")
+def api_style(request: StyleRequest) -> dict:
+    """Store the writing rules the browser read from a file the author picked.
+
+    The page sends the text because it cannot send a path. An empty request
+    clears the rules.
+    """
+    with _lock:
+        state = load_state()
+        path = style_guide_file()
+        if not request.text.strip():
+            state["settings"]["style_guide"] = None
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(request.text, encoding="utf-8")
+            state["settings"]["style_guide"] = request.name or "style-guide.md"
+        save_state(state)
+        REVIEW_SESSION.reset()     # a primed session holds the old rules
+        return {"ok": True, "style": state["settings"]["style_guide"],
+                "words": len(style_guide_text().split()),
+                "stored_at": str(path)}
 
 
 class SetupRequest(BaseModel):

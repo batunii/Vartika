@@ -69,9 +69,38 @@ def looks_like_manuscript(folder: Path) -> bool:
     return folder.is_dir() and bool(app.find_root_candidates(folder, max_depth=1))
 
 
-def config_path() -> Path:
+def config_dir() -> Path:
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
-    return Path(base) / ".vartika" / "last-manuscript.txt"
+    return Path(base) / ".vartika"
+
+
+def config_path() -> Path:
+    return config_dir() / "last-manuscript.txt"
+
+
+def access_token() -> str:
+    """A token that survives restarts, so an open tab keeps working.
+
+    Minting a new one each run silently killed every tab opened from an earlier
+    URL: the page loaded, every request came back 403, and nothing on it
+    responded. It is still unguessable, which is all it needs to be.
+    """
+    path = config_dir() / "token.txt"
+    try:
+        existing = path.read_text(encoding="utf-8").strip()
+        if len(existing) >= 20:
+            return existing
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(token, encoding="utf-8")
+        if os.name == "posix":
+            path.chmod(0o600)
+    except OSError:
+        pass          # a token we cannot store still works for this run
+    return token
 
 
 def read_remembered() -> Path | None:
@@ -146,7 +175,7 @@ def main() -> None:
     preflight()
 
     force_pick = "--pick" in sys.argv or bool(os.environ.get("REWRITE_PICK"))
-    app.ACCESS_TOKEN = secrets.token_urlsafe(24)
+    app.ACCESS_TOKEN = access_token()
     os.environ.setdefault("REWRITE_START", str(here()))
 
     manuscript = obvious_manuscript(force_pick)
