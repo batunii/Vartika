@@ -51,6 +51,13 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The native file and folder dialogs use tkinter, which ships with the
+      # python.org and Homebrew builds but not with the bare Ubuntu runner.
+      # Without it the frozen binary has no dialogs.
+      - name: Install tkinter (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y python3-tk
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

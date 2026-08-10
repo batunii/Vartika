@@ -52,9 +52,13 @@ python build.py               # build the standalone binary (needs pyinstaller)
 A manuscript folder is one containing a `.tex` file with `\documentclass` in it.
 
 **Choosing one happens in the app**, on a first page that lists every manuscript
-it found near the binary with its file count and when it was last edited, plus a
-folder browser for anything else. Folders that are manuscripts are marked as
-such while you browse, so you are never guessing.
+it found near the binary with its file count and when it was last edited, and a
+**Choose a folder…** button that opens your usual folder dialog. A path can be
+pasted instead.
+
+The dialogs are opened by the server, which runs on your own machine — a browser
+will not reveal where a chosen file lives, but this program can ask the operating
+system directly.
 
 It only skips that page when the answer is unambiguous: a single manuscript
 sitting beside the executable, or one you named explicitly. It will not choose
@@ -137,14 +141,10 @@ By default **no style guide is sent**. The reviewer still checks meaning,
 grammar, LaTeX and machine-sounding phrasing — those are built in, and the
 spelling convention is inferred from your original rather than imposed.
 
-To have it enforce your own conventions, click **Style** and choose a markdown
-file with your browser's own file dialog.
-
-The text is copied to `.rewrite-progress/style-guide.md`, because a browser will
-not tell an app where the file you picked lives — it hands over the contents
-only. That copy is read fresh on every review, so you can edit it there
-directly; editing your original will not carry across, so pick it again to
-update.
+To have it enforce your own conventions, click **Style**, then **Choose a
+file…**, and pick any markdown file in your usual file dialog. It is read fresh
+on every review, so editing it changes the reviewer straight away. If the file
+later moves, the header says so rather than quietly reverting to no rules.
 
 Nothing is bundled: writing rules are one author's voice, and shipping a
 particular set would impose them on everyone.

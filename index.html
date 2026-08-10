@@ -217,8 +217,7 @@
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cand-meta { text-align: right; font: 11.5px/1.6 var(--mono); color: var(--muted); white-space: nowrap; }
   .setup-none { color: var(--muted); font-size: 13px; padding: 10px 0 18px; }
-  #setup-browse-wrap { margin-top: 18px; }
-  #setup-browse-wrap summary { cursor: pointer; color: var(--accent); font-size: 13px; padding: 6px 0; }
+  #setup-manual-wrap summary { cursor: pointer; color: var(--accent); font-size: 13px; padding: 6px 0; }
   .browse { border: 1px solid var(--line); border-radius: 8px; margin-top: 10px; background: var(--panel); }
   .browse-bar { display: flex; gap: 7px; padding: 10px; border-bottom: 1px solid var(--line); }
   .browse-bar input {
@@ -386,19 +385,16 @@
 
     <div id="setup-suggestions"></div>
 
-    <details id="setup-browse-wrap">
-      <summary>Somewhere else on this computer</summary>
-      <div class="browse">
-        <div class="browse-bar">
-          <button id="browse-up" title="Up one level">↑</button>
-          <input id="browse-path" spellcheck="false" placeholder="Type or paste a folder path">
-          <button id="browse-go">Go</button>
-        </div>
-        <div id="browse-list"></div>
-        <div class="browse-foot">
-          <span id="browse-here" class="muted"></span>
-          <button id="browse-use" class="primary" disabled>Use this folder</button>
-        </div>
+    <div style="margin-top: 18px; display: flex; gap: 10px; align-items: center;">
+      <button id="setup-browse" class="primary">Choose a folder…</button>
+      <span class="muted" style="font-size:12.5px">Opens your usual folder dialog.</span>
+    </div>
+
+    <details id="setup-manual-wrap" style="margin-top:16px">
+      <summary>Or type a path</summary>
+      <div class="browse-bar" style="border:1px solid var(--line); border-radius:8px; margin-top:8px">
+        <input id="browse-path" spellcheck="false" placeholder="Paste the folder holding your .tex files">
+        <button id="browse-go">Open</button>
       </div>
     </details>
 
@@ -420,16 +416,13 @@
     </p>
     <div style="padding: 4px 20px 18px">
       <div id="style-current" class="style-current"></div>
-      <input type="file" id="style-input" accept=".md,.markdown,.txt" hidden>
       <div style="display:flex; gap:8px; align-items:center; margin-top:14px">
         <button id="style-choose" class="primary">Choose a file…</button>
         <button id="style-clear">Use no writing rules</button>
       </div>
       <p class="muted" style="font-size:12px; margin:14px 0 0; max-width:70ch">
-        The text is copied to <code id="style-stored"></code>, because a browser
-        will not tell this app where the file you picked lives. That copy is read
-        fresh on every review, so it can be edited there — but editing your
-        original will not carry across. Pick it again to update.
+        The file is read fresh on every review, so editing it changes the
+        reviewer straight away.
       </p>
     </div>
   </div>
@@ -564,7 +557,6 @@ async function api(path, options) {
 
 // ---------- setup: choosing a manuscript ----------
 
-const setupState = { browsePath: null, browseIsManuscript: false };
 
 function showSetup(show) {
   $('setup').hidden = !show;
@@ -604,37 +596,20 @@ async function loadSetup() {
   document.querySelectorAll('.cand[data-path]').forEach(node => {
     node.onclick = () => choose(node.dataset.path);
   });
-  if (!list.length) $('setup-browse-wrap').open = true;
-  if (!setupState.browsePath) browseTo(data.start || data.home);
+  if (!list.length) $('setup-manual-wrap').open = true;
 }
 
-async function browseTo(path) {
-  let data;
+async function chooseManuscriptFolder() {
+  const button = $('setup-browse');
+  button.disabled = true;
+  button.textContent = 'Waiting for the dialog…';
   try {
-    data = await api('/api/browse?path=' + encodeURIComponent(path || ''));
-  } catch (error) {
-    $('browse-list').innerHTML =
-      `<div class="browse-row" style="color:var(--fail)">${escapeHtml(error.message)}</div>`;
-    return;
+    const path = await pick('folder');
+    if (path) await choose(path);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Choose a folder…';
   }
-  setupState.browsePath = data.path;
-  setupState.browseIsManuscript = data.self.is_manuscript;
-  $('browse-path').value = data.path;
-  $('browse-here').textContent = data.self.is_manuscript
-    ? `${data.path} — ${data.self.tex_count} .tex, main file ${data.self.roots.join(', ')}`
-    : `${data.path} — no main .tex directly in this folder`;
-  $('browse-use').disabled = !data.self.is_manuscript;
-  $('browse-up').disabled = !data.parent;
-  $('browse-list').innerHTML = data.folders.length
-    ? data.folders.map(f => `
-        <div class="browse-row" data-path="${escapeAttr(f.path)}">
-          <span>📁</span><span>${escapeHtml(f.name)}</span>
-          ${f.is_manuscript ? '<span class="tag">manuscript</span>' : ''}
-        </div>`).join('')
-    : '<div class="browse-row muted">No sub-folders here.</div>';
-  document.querySelectorAll('.browse-row[data-path]').forEach(node => {
-    node.onclick = () => browseTo(node.dataset.path);
-  });
 }
 
 async function choose(path, rootTex) {
@@ -666,7 +641,7 @@ function askRoot(result) {
         <div class="cand-main"><b>${escapeHtml(r.name)}</b>
           <small>${r.includes} included file${r.includes === 1 ? '' : 's'}</small></div>
       </button>`).join('')}`;
-  $('setup-browse-wrap').open = false;
+  $('setup-manual-wrap').open = false;
   document.querySelectorAll('.cand[data-root]').forEach(node => {
     node.onclick = () => choose(result.path, node.dataset.root);
   });
@@ -739,11 +714,17 @@ function renderOverview(data) {
 
   // Writing rules are opt-in: one file, chosen with the browser's own picker.
   state.styleWords = data.style_words;
-  state.styleFile = data.style_file;
-  $('style-name').textContent = data.style ? baseName(data.style) : 'none';
-  $('btn-style').title = data.style
-    ? `${data.style} — ${data.style_words} words, sent with every review. Click to change.`
-    : 'No writing rules sent. Click to choose a markdown file.';
+  state.styleMissing = data.style_missing;
+  state.styleResolved = data.style;
+  $('style-name').textContent = data.style_missing
+    ? `${baseName(data.style_missing)} (missing)`
+    : (data.style ? baseName(data.style) : 'none');
+  $('style-name').style.color = data.style_missing ? 'var(--warn)' : '';
+  $('btn-style').title = data.style_missing
+    ? `${data.style_missing} could not be found, so no writing rules are being sent.`
+    : data.style
+      ? `${data.style} — ${data.style_words} words, sent with every review. Click to change.`
+      : 'No writing rules sent. Click to choose a markdown file.';
 
   renderFiles();
 }
@@ -1298,26 +1279,41 @@ $('modes-backdrop').onclick = event => {
 const showStyle = show => {
   $('style-backdrop').hidden = !show;
   if (show) {
-    const chosen = state.settings.style_guide;
-    $('style-current').innerHTML = chosen
-      ? `Using <b>${escapeHtml(chosen)}</b> — ${state.styleWords || 0} words of rules, sent with every review.`
-      : 'No writing rules are being sent.';
-    $('style-stored').textContent = state.styleFile || '';
+    $('style-current').innerHTML = state.styleMissing
+      ? `<b style="color:var(--warn)">${escapeHtml(state.styleMissing)}</b> could not be found, `
+        + 'so no writing rules are being sent. Choose it again, or clear it.'
+      : state.styleResolved
+        ? `Using <b>${escapeHtml(state.styleResolved)}</b> — ${state.styleWords} words, sent with every review.`
+        : 'No writing rules are being sent.';
   }
 };
 
-async function useStyleFile(file) {
-  if (!file) return;
-  const text = await file.text();
-  if (!text.trim()) { alert('That file is empty.'); return; }
-  const result = await post('/api/style', { name: file.name, text });
-  await refreshOverview();
-  showStyle(false);
-  setStatus(`Writing rules from ${result.style} (${result.words} words)`);
+// The dialog is opened by the server, which runs on this machine, so it hands
+// back a real path rather than just the file's contents.
+async function pick(what) {
+  const result = await post(`/api/pick?what=${what}`, {});
+  return result.cancelled ? null : result.path;
+}
+
+async function chooseStyleFile() {
+  const button = $('style-choose');
+  button.disabled = true;
+  button.textContent = 'Waiting for the dialog…';
+  try {
+    const path = await pick('file');
+    if (!path) return;
+    const result = await post('/api/style', { path });
+    await refreshOverview();
+    showStyle(false);
+    setStatus(`Writing rules from ${baseName(result.style)} (${result.words} words)`);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Choose a file…';
+  }
 }
 
 async function clearStyle() {
-  await post('/api/style', { name: '', text: '' });
+  await post('/api/style', { path: '' });
   await refreshOverview();
   showStyle(false);
   setStatus('No writing rules will be sent');
@@ -1326,8 +1322,7 @@ async function clearStyle() {
 $('btn-style').onclick = () => showStyle(true);
 $('style-close').onclick = () => showStyle(false);
 $('style-backdrop').onclick = e => { if (e.target === $('style-backdrop')) showStyle(false); };
-$('style-choose').onclick = () => $('style-input').click();
-$('style-input').onchange = e => useStyleFile(e.target.files[0]).catch(err => alert(err.message));
+$('style-choose').onclick = () => chooseStyleFile().catch(err => alert(err.message));
 $('style-clear').onclick = () => clearStyle().catch(err => alert(err.message));
 $('model-picker').onchange = event => {
   post('/api/settings', { model: event.target.value })
@@ -1373,15 +1368,11 @@ window.addEventListener('beforeunload', event => {
   if ($('rewrite').value.trim() && !state.busy) { event.preventDefault(); event.returnValue = ''; }
 });
 
-$('browse-up').onclick = () => {
-  api('/api/browse?path=' + encodeURIComponent(setupState.browsePath || ''))
-    .then(d => d.parent && browseTo(d.parent));
-};
-$('browse-go').onclick = () => browseTo($('browse-path').value.trim());
+$('setup-browse').onclick = () => chooseManuscriptFolder().catch(err => alert(err.message));
+$('browse-go').onclick = () => choose($('browse-path').value.trim());
 $('browse-path').onkeydown = event => {
-  if (event.key === 'Enter') browseTo($('browse-path').value.trim());
+  if (event.key === 'Enter') choose($('browse-path').value.trim());
 };
-$('browse-use').onclick = () => choose(setupState.browsePath);
 $('btn-open').onclick = () => showSetup(true);
 $('setup-cancel').onclick = () => showSetup(false);
 

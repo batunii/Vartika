@@ -29,6 +29,47 @@ BANNER = r"""
 """
 
 
+def run_picker() -> int:
+    """Show a native file or folder dialog and print what was chosen.
+
+    Run as a short-lived subprocess of the server, which is on this same
+    machine, so the dialog appears on the author's own desktop. A subprocess
+    rather than a thread because tk insists on the main thread on macOS, and
+    the server's request handlers do not run there.
+    """
+    wants_file = "--pick-file" in sys.argv
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return 2
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)     # otherwise it can open behind the browser
+    try:
+        if wants_file:
+            chosen = filedialog.askopenfilename(
+                title="Choose your writing rules",
+                filetypes=[("Markdown and text", "*.md *.markdown *.txt"),
+                           ("All files", "*.*")],
+            )
+        else:
+            chosen = filedialog.askdirectory(title="Choose the folder holding your .tex files")
+    finally:
+        root.destroy()
+
+    if chosen:
+        print(chosen)
+    return 0
+
+
+# Handled before anything else, including the Claude Code check: this process
+# is only here to show one dialog.
+if "--pick-folder" in sys.argv or "--pick-file" in sys.argv:
+    raise SystemExit(run_picker())
+
+
 def log(message: str = "") -> None:
     print(message, flush=True)
 

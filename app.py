@@ -406,20 +406,26 @@ def audit(entry: dict) -> None:
         handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def style_guide_file() -> Path:
-    """Where the chosen writing rules are kept.
+def style_guide_path() -> Path | None:
+    """The markdown file whose text is sent with every review, if one is chosen.
 
-    A browser cannot tell the server where a picked file lives — it only hands
-    over the contents — so the text is stored here. It is a plain markdown file,
-    read fresh on every review, so it can also be edited in place.
+    A real path rather than a copy, because the dialog that chose it runs on
+    this machine. Editing that file therefore changes the reviewer with no
+    further step.
     """
-    return DATA_DIR / "style-guide.md"
+    setting = load_state()["settings"].get("style_guide")
+    if not setting:
+        return None
+    path = Path(setting)
+    if not path.is_absolute():
+        path = MANUSCRIPT / setting
+    return path if path.is_file() else None
 
 
 def style_guide_text() -> str:
-    """The writing conventions in force, or nothing at all."""
-    path = style_guide_file()
-    if not load_state()["settings"].get("style_guide") or not path.is_file():
+    """The writing conventions in force, read fresh so edits take effect."""
+    path = style_guide_path()
+    if path is None:
         return ""
     try:
         return path.read_text(encoding="utf-8", errors="replace")
@@ -564,9 +570,11 @@ def overview(state: dict) -> dict:
         "manuscript": str(MANUSCRIPT),
         "root_tex": ROOT_TEX.relative_to(MANUSCRIPT).as_posix() if ROOT_TEX else None,
         "root_choices": [p.relative_to(MANUSCRIPT).as_posix() for p in candidates],
-        "style": state["settings"].get("style_guide"),
-        "style_file": str(style_guide_file()),
+        "style": str(chosen_style) if (chosen_style := style_guide_path()) else None,
         "style_words": len(style_guide_text().split()),
+        # A file that was chosen and has since moved or been deleted. Silently
+        # reverting to no rules would be worse than saying so.
+        "style_missing": (state["settings"].get("style_guide") or "") if not chosen_style else "",
         "usage": state["usage"],
         "usage_by_model": state["usage_by_model"],
         "totals": {
@@ -681,6 +689,53 @@ def nearby_manuscripts(start: Path) -> list[dict]:
     return described[:30]
 
 
+def picker_command(what: str) -> list[str] | None:
+    """How to re-invoke this program purely to show a dialog.
+
+    Frozen, the executable is its own entry point; from source it is the
+    launcher script beside this file.
+    """
+    flag = "--pick-file" if what == "file" else "--pick-folder"
+    if getattr(sys, "frozen", False):
+        return [sys.executable, flag]
+    launcher = Path(__file__).resolve().parent / "launcher.py"
+    return [sys.executable, str(launcher), flag] if launcher.exists() else None
+
+
+@app.post("/api/pick")
+def api_pick(what: str = "folder") -> dict:
+    """Open the operating system's own file or folder dialog.
+
+    A browser will not reveal where a chosen file lives, but this server runs
+    on the same machine as the author, so it can ask directly and get a real
+    path back.
+    """
+    command = picker_command(what)
+    if command is None:
+        raise HTTPException(500, "Cannot find the picker entry point.")
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+    except subprocess.TimeoutExpired:
+        return {"cancelled": True, "reason": "The dialog was left open too long."}
+    except OSError as exc:
+        raise HTTPException(500, f"Could not open a dialog: {exc}") from exc
+
+    if completed.returncode == 2:
+        raise HTTPException(
+            500,
+            "This build has no native dialogs available (tkinter is missing). "
+            "Type or paste the path instead.",
+        )
+    chosen = (completed.stdout or "").strip().splitlines()
+    path = chosen[-1].strip() if chosen else ""
+    if not path:
+        return {"cancelled": True}
+    return {"path": str(Path(path).resolve())}
+
+
 @app.get("/api/setup")
 def api_setup() -> dict:
     start = Path(os.environ.get("REWRITE_START") or Path.cwd())
@@ -741,32 +796,25 @@ def api_browse(path: str = "", files: str = "") -> dict:
 
 
 class StyleRequest(BaseModel):
-    name: str = ""
-    text: str = ""
+    path: str = ""
 
 
 @app.post("/api/style")
 def api_style(request: StyleRequest) -> dict:
-    """Store the writing rules the browser read from a file the author picked.
-
-    The page sends the text because it cannot send a path. An empty request
-    clears the rules.
-    """
+    """Point the reviewer at a file of writing rules, or at nothing."""
     with _lock:
         state = load_state()
-        path = style_guide_file()
-        if not request.text.strip():
+        if not request.path.strip():
             state["settings"]["style_guide"] = None
-            path.unlink(missing_ok=True)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(request.text, encoding="utf-8")
-            state["settings"]["style_guide"] = request.name or "style-guide.md"
+            chosen = Path(request.path).expanduser()
+            if not chosen.is_file():
+                raise HTTPException(400, f"{chosen} is not a file.")
+            state["settings"]["style_guide"] = str(chosen.resolve())
         save_state(state)
         REVIEW_SESSION.reset()     # a primed session holds the old rules
         return {"ok": True, "style": state["settings"]["style_guide"],
-                "words": len(style_guide_text().split()),
-                "stored_at": str(path)}
+                "words": len(style_guide_text().split())}
 
 
 class SetupRequest(BaseModel):
