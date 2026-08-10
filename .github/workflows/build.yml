@@ -54,7 +54,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller httpx
 
       - name: Check it imports and parses
         run: |
@@ -75,12 +75,29 @@ jobs:
           import app
           from pathlib import Path
           m = Path('sample').resolve()
-          app.configure(manuscript=m, repo_root=m, data_dir=Path('sample-data'))
+          app.configure(manuscript=m, data_dir=Path('sample-data'))
           files = app.file_order()
           assert files, 'no files discovered'
-          blocks = app.read_blocks(files[1][0])[1]
+          rel = files[1][0]
+          blocks = app.read_blocks(rel)[1]
           assert blocks, 'no paragraphs found'
-          print('parsed', len(files), 'files,', len(blocks), 'paragraph(s)')
+
+          # Accept a paragraph, then put it back, and check the file is
+          # byte-identical afterwards. This is the whole save-and-undo path.
+          before = app.read_source(m / rel)
+          app.ACCESS_TOKEN = ''
+          from fastapi.testclient import TestClient
+          client = TestClient(app.app)
+          key = blocks[0].key
+          assert client.post('/api/accept', json={'file': rel, 'key': key,
+              'text': 'A replacement paragraph long enough to count as prose here.',
+              'source': 'mine'}).json()['ok']
+          assert app.read_source(m / rel) != before, 'accept did not change the file'
+          assert (Path('sample-data') / 'originals' / rel).exists(), 'no original kept'
+          assert client.get('/api/changes').json()['count'] == 1
+          assert client.post('/api/revert', json={'file': rel, 'key': key}).json()['ok']
+          assert app.read_source(m / rel) == before, 'revert did not restore the file'
+          print('parsed', len(files), 'files,', len(blocks), 'paragraph(s); accept and revert round-trip clean')
           "
 
       - name: Mark executable (macOS, Linux)

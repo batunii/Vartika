@@ -225,6 +225,36 @@
     background: #4d2725; color: #f0c4c1; font-size: 13px;
   }
 
+  /* ---- changes sheet ---- */
+  #changes-list { display: grid; gap: 10px; padding: 12px 20px; }
+  .change {
+    border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel-2); padding: 12px 14px;
+  }
+  .change-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .change-top b { font-size: 13px; }
+  .change-top .when { margin-left: auto; font: 11.5px var(--mono); color: var(--muted); }
+  .change-badge {
+    font: 600 9.5px/1 var(--mono); text-transform: uppercase; letter-spacing: .6px;
+    padding: 3px 5px; border-radius: 3px; background: var(--panel); color: var(--muted);
+  }
+  .change-texts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 9px; }
+  .change-texts div { min-width: 0; }
+  .change-texts h4 {
+    margin: 0 0 4px; font: 600 10px/1 var(--mono); letter-spacing: .6px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .change-texts pre {
+    margin: 0; font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-word;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 8px 10px; max-height: 150px; overflow-y: auto;
+  }
+  .change-texts .was pre { color: #c9a9a6; }
+  .change-texts .now pre { color: #a9c9b6; }
+  .change-actions { display: flex; gap: 8px; margin-top: 9px; align-items: center; }
+  .change-actions .muted { font-size: 12px; margin-left: auto; }
+  @media (max-width: 720px) { .change-texts { grid-template-columns: 1fr; } }
+
   /* ---- mode sheet ---- */
   .backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,.55);
@@ -307,6 +337,7 @@
     <div class="metric" id="m-usage-wrap" style="cursor:pointer" title="Click for the full breakdown">
       <b id="m-usage">—</b><span>spent / tokens</span>
     </div>
+    <button id="btn-changes" title="Everything Vartika has changed, with undo">Changes <b id="changes-count">0</b></button>
     <button id="btn-modes" title="How the rules reach the reviewer">Mode: <b id="mode-label">—</b></button>
     <select id="style-picker" title="Writing rules sent with every review"></select>
     <select id="model-picker" title="Reviewer model"></select>
@@ -343,6 +374,24 @@
     </details>
 
     <div id="setup-error" class="setup-error" hidden></div>
+  </div>
+</div>
+
+<div id="changes-backdrop" class="backdrop" hidden>
+  <div class="sheet" role="dialog" aria-label="Changes">
+    <div class="sheet-head">
+      <h2>Changes</h2>
+      <span id="changes-summary" class="muted" style="font-size:12.5px"></span>
+      <button id="changes-download" title="A unified diff of everything, as a .patch file">Download .patch</button>
+      <button id="changes-close" title="Close">✕</button>
+    </div>
+    <p class="sheet-intro">
+      Every paragraph replaced so far, newest first. Reverting puts one back to
+      the text it had before, leaving the rest of the document alone.
+      <span class="muted">An untouched copy of each file, from before the first
+      edit, is kept in <code>.rewrite-progress/originals/</code>.</span>
+    </p>
+    <div id="changes-list"></div>
   </div>
 </div>
 
@@ -589,6 +638,7 @@ function renderOverview(data) {
 
   const t = data.totals;
   $('m-progress').textContent = `${t.done} / ${t.paragraphs}`;
+  $('changes-count').textContent = t.done;
   $('m-prose').textContent = t.prose_words.toLocaleString();
   const limit = data.settings.word_limit;
   const doc = t.document_words;
@@ -1035,6 +1085,71 @@ function renderModes(data) {
   });
 }
 
+// ---------- changes: what was replaced, and putting it back ----------
+
+async function loadChanges() {
+  const data = await api('/api/changes');
+  $('changes-count').textContent = data.count;
+  const delta = data.word_delta;
+  $('changes-summary').textContent = data.count
+    ? `${data.count} paragraph${data.count === 1 ? '' : 's'} replaced · ${delta > 0 ? '+' : ''}${delta} words`
+    : '';
+  $('changes-list').innerHTML = data.changes.length
+    ? data.changes.map(c => `
+        <div class="change">
+          <div class="change-top">
+            <b>${escapeHtml(c.title)}</b>
+            <span class="change-badge">${escapeHtml(c.source || 'mine')}</span>
+            ${c.verdict ? `<span class="change-badge">${escapeHtml(c.verdict)}</span>` : ''}
+            <span class="when">${c.words_before} → ${c.words_after} words · ${escapeHtml(shortTime(c.ts))}</span>
+          </div>
+          <div class="change-texts">
+            <div class="was"><h4>Was</h4><pre>${escapeHtml(c.original)}</pre></div>
+            <div class="now"><h4>Now</h4><pre>${escapeHtml(c.final)}</pre></div>
+          </div>
+          <div class="change-actions">
+            <button data-revert="${escapeAttr(c.key)}" data-file="${escapeAttr(c.file)}">Revert this paragraph</button>
+            <button data-goto="${escapeAttr(c.key)}" data-file="${escapeAttr(c.file)}">Go to it</button>
+          </div>
+        </div>`).join('')
+    : '<div class="hint">Nothing has been changed yet.</div>';
+
+  document.querySelectorAll('[data-revert]').forEach(node => {
+    node.onclick = async () => {
+      if (!confirm('Put this paragraph back to the text it had before?')) return;
+      node.disabled = true;
+      try {
+        const result = await post('/api/revert', { file: node.dataset.file, key: node.dataset.revert });
+        renderOverview(result.overview);
+        await loadChanges();
+        if (state.file === node.dataset.file) {
+          const list = await api(`/api/paragraphs?file=${encodeURIComponent(state.file)}`);
+          state.paragraphs = list.paragraphs;
+          renderParagraphs();
+          if (state.key === node.dataset.revert) await openParagraph(state.key);
+        }
+        setStatus('Reverted');
+      } catch (error) {
+        alert(error.message);
+        node.disabled = false;
+      }
+    };
+  });
+  document.querySelectorAll('[data-goto]').forEach(node => {
+    node.onclick = async () => {
+      showChanges(false);
+      if (state.file !== node.dataset.file) await openFile(node.dataset.file, node.dataset.goto);
+      else await openParagraph(node.dataset.goto);
+    };
+  });
+}
+
+function shortTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
 const compact = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M'
   : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(n);
 
@@ -1100,6 +1215,17 @@ $('btn-prev').onclick = () => step(-1);
 $('btn-next').onclick = () => step(1);
 $('btn-settings').onclick = settings;
 $('m-texcount-wrap').onclick = refreshTexcount;
+const showChanges = show => {
+  $('changes-backdrop').hidden = !show;
+  if (show) loadChanges();
+};
+$('btn-changes').onclick = () => showChanges(true);
+$('changes-close').onclick = () => showChanges(false);
+$('changes-backdrop').onclick = event => {
+  if (event.target === $('changes-backdrop')) showChanges(false);
+};
+$('changes-download').onclick = () => { window.location = '/api/diff'; };
+
 const showModes = show => { $('modes-backdrop').hidden = !show; };
 $('btn-modes').onclick = () => showModes(true);
 $('modes-close').onclick = () => showModes(false);
@@ -1137,6 +1263,7 @@ $('rewrite').oninput = () => {
 $('hide-done').onchange = renderParagraphs;
 
 document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('changes-backdrop').hidden) { showChanges(false); return; }
   if (event.key === 'Escape' && !$('modes-backdrop').hidden) { showModes(false); return; }
   if (event.key === 'Escape' && !$('setup').hidden && state.configured) { showSetup(false); return; }
   const ctrl = event.ctrlKey || event.metaKey;

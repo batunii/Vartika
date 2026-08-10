@@ -11,6 +11,7 @@ Run:  python app.py            (then open http://127.0.0.1:8000)
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -22,7 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 import texparse
@@ -982,6 +983,86 @@ def api_skip(request: KeyRequest) -> dict:
         save_state(state)
         audit({"event": "skip", "file": request.file, "key": request.key})
         return {"ok": True, "overview": overview(state)}
+
+
+@app.post("/api/revert")
+def api_revert(request: KeyRequest) -> dict:
+    """Put one paragraph back to the text it had before it was replaced.
+
+    The file is edited in place, exactly as accepting does, so this undoes a
+    single paragraph without disturbing anything else in the document.
+    """
+    with _lock:
+        state = load_state()
+        rid = record_id(request.file, request.key)
+        record = state["records"].get(rid)
+        if not record or record.get("status") != "done":
+            raise HTTPException(400, "That paragraph has not been changed.")
+
+        source, block = find_block(request.file, request.key)
+        original = record.get("original")
+        if not original:
+            raise HTTPException(400, "No original text was recorded for it.")
+
+        write_source(resolve(request.file), texparse.splice(source, block, original))
+        state["records"].pop(rid, None)
+        save_state(state)
+        audit({"event": "revert", "file": request.file, "key": request.key,
+               "restored": original, "replaced": record.get("final")})
+        return {"ok": True, "overview": overview(state)}
+
+
+@app.get("/api/changes")
+def api_changes() -> dict:
+    """Every paragraph this app has replaced, newest first."""
+    state = load_state()
+    order = {rel: i for i, (rel, _) in enumerate(file_order())}
+    titles = dict(file_order())
+    rows = []
+    for rid, record in state["records"].items():
+        if record.get("status") != "done":
+            continue
+        relpath = record.get("file", "")
+        key = rid.split("::", 1)[1] if "::" in rid else ""
+        rows.append({
+            "file": relpath,
+            "title": titles.get(relpath, relpath),
+            "key": key,
+            "original": record.get("original", ""),
+            "final": record.get("final", ""),
+            "words_before": record.get("words_before"),
+            "words_after": record.get("words_after"),
+            "verdict": record.get("verdict"),
+            "source": record.get("source"),
+            "ts": record.get("ts"),
+            "order": order.get(relpath, 999),
+        })
+    rows.sort(key=lambda r: r["ts"] or "", reverse=True)
+    changed_words = sum((r["words_after"] or 0) - (r["words_before"] or 0) for r in rows)
+    return {"changes": rows, "count": len(rows), "word_delta": changed_words}
+
+
+@app.get("/api/diff")
+def api_diff() -> PlainTextResponse:
+    """A unified diff of everything this app has changed, as a patch file.
+
+    Compares the untouched copies kept before the first edit against the files
+    as they stand, so it shows the whole of Vartika's work in one place and can
+    be read, kept, or reversed with `patch -R`.
+    """
+    chunks: list[str] = []
+    for relpath, _title in file_order():
+        original = ORIGINALS_DIR / relpath
+        current = MANUSCRIPT / relpath
+        if not original.exists() or not current.exists():
+            continue
+        before = read_source(original).splitlines(keepends=True)
+        after = read_source(current).splitlines(keepends=True)
+        chunks.extend(difflib.unified_diff(
+            before, after, fromfile=f"a/{relpath}", tofile=f"b/{relpath}", n=3))
+    body = "".join(chunks) or "No changes yet.\n"
+    return PlainTextResponse(body, headers={
+        "Content-Disposition": 'attachment; filename="vartika-changes.patch"'})
 
 
 @app.post("/api/reopen")

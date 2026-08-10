@@ -110,6 +110,17 @@ detected per file, so the source stays consistent and each diff shows only the
 words that changed. A paragraph containing an explicit `\\` line break is left
 exactly as written.
 
+## Seeing and undoing what changed
+
+Accepting writes the paragraph into the `.tex` immediately. **Changes** in the
+header opens everything this app has replaced, newest first, with the old and
+new text side by side, the word delta, and the verdict it was accepted under.
+
+From there you can **revert a single paragraph** to exactly what it was, leaving
+the rest of the document alone, or **download a `.patch`** — a unified diff of
+the untouched originals against the files as they stand, which you can read,
+keep, or reverse with `patch -R`.
+
 ## Word counts
 
 Three numbers, measuring different things:
